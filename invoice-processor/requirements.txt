@@ -1,0 +1,27 @@
+# Invoice Processing System - Dependencies
+# Approved by Galatiq Committee Session 2026-01-26_BLUEPRINT
+# Updated: Session 2026-01-26_CONNECT (API integration)
+
+# LLM Client - OpenAI-compatible SDK for xAI Grok
+openai>=1.0.0
+
+# Orchestration - LangGraph for multi-agent workflow
+langgraph>=0.2.0
+
+# Environment - Load .env files
+python-dotenv>=1.0.0
+
+# Optional: Better console output
+colorama>=0.4.6
+
+# API Server - FastAPI + WebSocket support
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+websockets>=11.0
+
+# PDF Processing - Text extraction from invoice PDFs
+# Added: Session 2026-01-27_INGEST (Galatiq Committee)
+pdfplumber>=0.10.0
+
+# Form data / File upload support
+python-multipart>=0.0.5

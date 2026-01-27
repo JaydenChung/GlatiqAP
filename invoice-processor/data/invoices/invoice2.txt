@@ -1,0 +1,9 @@
+Vndr: Gadgets Co.
+200 Gadget Lane, Seattle, WA 98101
+invoices@gadgets.co | (206) 555-4321
+
+Amt: $15,000
+Itms: GadgetX:20 @ $750
+
+Due: 2026-01-30
+Terms: Net 20

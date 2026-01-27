@@ -1,0 +1,981 @@
+import { useState, useEffect, useRef } from 'react';
+import { 
+  CheckCircle, 
+  Loader2, 
+  XCircle, 
+  Clock,
+  ArrowRight,
+  AlertTriangle,
+  Sparkles,
+  RefreshCw,
+  Code,
+  GitBranch,
+  Cpu,
+  Braces,
+  Wifi,
+  WifiOff,
+  Coins,
+  Inbox,
+  FileText
+} from 'lucide-react';
+
+const stages = [
+  { id: 'ingestion', label: 'Ingestion', icon: '📥', description: 'Extract structured data' },
+  { id: 'validation', label: 'Validation', icon: '✅', description: 'Check inventory & rules' },
+  { id: 'approval', label: 'Approval', icon: '🤔', description: 'AI decision reasoning' },
+  { id: 'payment', label: 'Payment', icon: '💰', description: 'Execute transaction' },
+];
+
+const WEBSOCKET_URL = 'ws://localhost:8000/ws/process';
+
+export default function ProcessingView({ invoice, onComplete }) {
+  const [currentStage, setCurrentStage] = useState(0);
+  const [stageStatus, setStageStatus] = useState(['pending', 'pending', 'pending', 'pending']);
+  const [logs, setLogs] = useState([]);
+  const [extractedData, setExtractedData] = useState(null);
+  const [validationResult, setValidationResult] = useState(null);
+  const [approvalResult, setApprovalResult] = useState(null);
+  const [result, setResult] = useState(null);
+  const [startTime] = useState(Date.now());
+  const [activePanel, setActivePanel] = useState('log'); // 'log' | 'json' | 'state'
+  const [currentJsonOutput, setCurrentJsonOutput] = useState(null);
+  const [workflowState, setWorkflowState] = useState({
+    raw_invoice: invoice.rawText,
+    invoice_data: null,
+    validation_result: null,
+    approval_decision: null,
+    payment_result: null,
+    current_agent: 'ingestion',
+    status: 'processing',
+  });
+  const [wsStatus, setWsStatus] = useState('connecting'); // 'connecting' | 'connected' | 'error' | 'closed'
+  const [tokenUsage, setTokenUsage] = useState({
+    total: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    byStage: {}
+  });
+  const logsEndRef = useRef(null);
+  const wsRef = useRef(null);
+
+  // Auto-scroll logs
+  useEffect(() => {
+    if (activePanel === 'log') {
+      logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logs, activePanel]);
+
+  // WebSocket connection and event handling
+  useEffect(() => {
+    // Track if this effect instance is still active (for cleanup)
+    let isActive = true;
+    
+    // Create WebSocket connection
+    const ws = new WebSocket(WEBSOCKET_URL);
+    wsRef.current = ws;
+    
+    ws.onopen = () => {
+      if (!isActive) return; // Ignore if unmounted
+      console.log('WebSocket connected');
+      setWsStatus('connected');
+      
+      // Send invoice data to process
+      ws.send(JSON.stringify({
+        raw_invoice: invoice.rawText,
+        invoice_id: invoice.id,
+      }));
+    };
+    
+    ws.onmessage = (event) => {
+      if (!isActive) return; // Ignore if unmounted
+      try {
+        const data = JSON.parse(event.data);
+        handleEvent(data);
+      } catch (e) {
+        console.error('Failed to parse WebSocket message:', e);
+      }
+    };
+    
+    ws.onerror = (error) => {
+      if (!isActive) return; // Ignore if unmounted
+      console.error('WebSocket error:', error);
+      setWsStatus('error');
+      addLog('error', '❌ WebSocket connection error');
+      // Fall back to mock processing
+      fallbackToMockProcessing();
+    };
+    
+    ws.onclose = () => {
+      if (!isActive) return; // Ignore if unmounted
+      console.log('WebSocket closed');
+      setWsStatus('closed');
+    };
+    
+    return () => {
+      isActive = false; // Mark as inactive before closing
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close();
+      }
+    };
+  }, [invoice]);
+
+  // Handle incoming WebSocket events
+  const handleEvent = (event) => {
+    const eventType = event.event;
+    
+    switch (eventType) {
+      case 'connected':
+        addLog('system', '🔌 Connected to processing server');
+        break;
+        
+      case 'stage_start':
+        handleStageStart(event);
+        break;
+        
+      case 'stage_complete':
+        handleStageComplete(event);
+        break;
+        
+      case 'grok_call':
+        addLog('grok', `🤖 Grok API Call:`);
+        addLog('grok', `   Model: ${event.model}`);
+        addLog('grok', `   Mode: ${event.mode} (structured output)`);
+        addLog('grok', `   Temperature: ${event.temperature}`);
+        break;
+        
+      case 'grok_response':
+        setCurrentJsonOutput({ stage: event.stage, data: event.data });
+        
+        // Update extracted data for display (ALL fields from expanded schema)
+        if (event.stage === 'ingestion' && event.data) {
+          setExtractedData({
+            // Header Details
+            invoiceNumber: event.data.invoice_number,
+            invoiceDate: event.data.invoice_date,
+            dueDate: event.data.due_date,
+            
+            // Amounts
+            vendor: event.data.vendor,
+            amount: event.data.amount,
+            subtotal: event.data.subtotal,
+            tax: event.data.tax,
+            currency: event.data.currency || 'USD',
+            
+            // Payment Info
+            paymentTerms: event.data.payment_terms,
+            poNumber: event.data.po_number,
+            
+            // Parties
+            billFrom: event.data.bill_from,
+            billTo: event.data.bill_to,
+            
+            // Line Items
+            items: event.data.items || [],
+            
+            // Metadata
+            confidence: event.data.confidence || 50,
+            flags: event.data.flags || [],
+          });
+        }
+        
+        if (event.stage === 'validation' && event.data) {
+          setValidationResult({
+            passed: event.data.is_valid,
+            errors: event.data.errors || [],
+            warnings: event.data.warnings || [],
+            inventoryCheck: Object.entries(event.data.inventory_check || {}).map(([item, check]) => ({
+              item,
+              requested: check.requested,
+              inStock: check.in_stock,
+              available: check.available,
+            })),
+            corrections: event.data.corrections || {},  // Capture validation corrections
+          });
+        }
+        
+        if (event.stage === 'approval' && event.data) {
+          setApprovalResult({
+            approved: event.data.approved,
+            riskScore: event.data.risk_score,
+            reason: event.data.reason,
+            requiresReview: event.data.requires_review,
+            reasoningChain: event.data.reasoning_chain || [],
+          });
+        }
+        break;
+        
+      case 'self_correction':
+        addLog('warning', `⚠️  ${event.reason}`);
+        addLog('warning', `🔄 SELF-CORRECTION: Retry attempt ${event.attempt}`);
+        break;
+        
+      case 'token_usage':
+        setTokenUsage(prev => ({
+          total: event.total || prev.total,
+          byStage: {
+            ...prev.byStage,
+            [event.stage]: event.usage
+          }
+        }));
+        if (event.usage) {
+          addLog('info', `   📊 Tokens: ${event.usage.prompt_tokens} in / ${event.usage.completion_tokens} out (${event.usage.total_tokens} total)`);
+        }
+        break;
+        
+      case 'state_update':
+        setWorkflowState(event.state);
+        break;
+        
+      case 'log':
+        addLog(event.level, event.message);
+        break;
+        
+      // STAGED WORKFLOW: Stage 1 complete (Ingestion + Validation)
+      case 'stage1_complete':
+        handleStage1Complete(event);
+        break;
+        
+      // STAGED WORKFLOW: Stage 2 complete (Approval)
+      case 'stage2_complete':
+        handleStage2Complete(event);
+        break;
+        
+      case 'complete':
+        handleComplete(event);
+        break;
+        
+      case 'rejected':
+        handleRejected(event);
+        break;
+        
+      case 'error':
+        addLog('error', `❌ ${event.message}`);
+        if (!result) {
+          setResult({
+            status: 'error',
+            reason: event.message,
+          });
+        }
+        break;
+        
+      default:
+        console.log('Unknown event:', event);
+    }
+  };
+
+  const handleStageStart = (event) => {
+    const stageIndex = stages.findIndex(s => s.id === event.stage);
+    if (stageIndex !== -1) {
+      setCurrentStage(stageIndex);
+      updateStageStatus(stageIndex, 'running');
+    }
+  };
+
+  const handleStageComplete = (event) => {
+    const stageIndex = stages.findIndex(s => s.id === event.stage);
+    if (stageIndex !== -1) {
+      updateStageStatus(stageIndex, event.status);
+    }
+  };
+
+  // STAGED WORKFLOW: Handle Stage 1 complete (invoice now in INBOX)
+  const handleStage1Complete = (event) => {
+    const resultData = event.result || {};
+    
+    // Update token usage
+    if (event.token_usage) {
+      setTokenUsage(prev => ({
+        ...prev,
+        total: event.token_usage
+      }));
+    }
+    
+    // Set result to trigger the footer - status is "inbox" for staged workflow
+    setResult({
+      status: 'inbox',
+      invoiceId: event.invoice_id || resultData.invoice_id,
+      invoiceStatus: resultData.invoice_status,
+      invoiceData: resultData.invoice_data,
+      validationResult: resultData.validation_result,
+      corrections: resultData.corrections || {},  // Include validation corrections
+      processingTime: event.processing_time,
+      tokenUsage: event.token_usage,
+      nextAction: resultData.next_action || 'route_to_approval',
+      message: resultData.message || 'Invoice processed. Route to approval to continue.',
+      // Source file info
+      source_type: resultData.source_type,
+      source_path: resultData.source_path,
+      original_filename: resultData.original_filename,
+    });
+  };
+
+  // STAGED WORKFLOW: Handle Stage 2 complete (approval analysis done)
+  const handleStage2Complete = (event) => {
+    const resultData = event.result || {};
+    
+    if (event.token_usage) {
+      setTokenUsage(prev => ({
+        ...prev,
+        total: event.token_usage
+      }));
+    }
+    
+    // Update approval result with route info
+    setApprovalResult(prev => ({
+      ...prev,
+      route: resultData.route,
+    }));
+    
+    setResult({
+      status: resultData.route === 'auto_approve' ? 'auto_approved' :
+              resultData.route === 'auto_reject' ? 'rejected' : 'pending_approval',
+      invoiceId: event.invoice_id,
+      invoiceStatus: resultData.invoice_status,
+      route: resultData.route,
+      processingTime: event.processing_time,
+      tokenUsage: event.token_usage,
+    });
+  };
+
+  const handleComplete = (event) => {
+    const resultData = event.result;
+    const approval = resultData.approval_decision || {};
+    const payment = resultData.payment_result || {};
+    
+    // Update final token usage
+    if (event.token_usage) {
+      setTokenUsage(prev => ({
+        ...prev,
+        total: event.token_usage
+      }));
+    }
+    
+    setResult({
+      status: 'approved',
+      riskScore: approval.risk_score || 0,
+      reason: approval.reason || 'Invoice processed successfully',
+      requiresReview: approval.requires_review || false,
+      transactionId: payment.transaction_id,
+      processingTime: event.processing_time,
+      tokenUsage: event.token_usage,
+    });
+  };
+
+  const handleRejected = (event) => {
+    setResult({
+      status: 'rejected',
+      reason: event.reason,
+      stage: event.stage,
+    });
+  };
+
+  // Fallback mock processing if WebSocket fails
+  const fallbackToMockProcessing = () => {
+    addLog('warning', '⚠️  Falling back to simulated processing');
+    // You could implement mock processing here as a fallback
+    // For now, just show an error
+    setResult({
+      status: 'error',
+      reason: 'Could not connect to processing server. Please ensure the API is running on localhost:8000',
+    });
+  };
+
+  const addLog = (type, message) => {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    setLogs(prev => [...prev, { time: elapsed, type, message }]);
+  };
+
+  const updateStageStatus = (index, status) => {
+    setStageStatus(prev => {
+      const next = [...prev];
+      next[index] = status;
+      return next;
+    });
+  };
+
+  const getElapsedTime = () => {
+    return ((Date.now() - startTime) / 1000).toFixed(1);
+  };
+
+  const getLogColor = (type) => {
+    switch (type) {
+      case 'success': return 'text-green-400';
+      case 'error': return 'text-red-400';
+      case 'warning': return 'text-amber-400';
+      case 'system': return 'text-blue-400 font-semibold';
+      case 'grok': return 'text-purple-400';
+      case 'json': return 'text-cyan-400 font-mono text-xs';
+      case 'state': return 'text-pink-400';
+      default: return 'text-gray-300';
+    }
+  };
+
+  const getStageStyles = (status) => {
+    switch (status) {
+      case 'complete':
+        return 'bg-green-500/20 text-green-400 border-green-500/30';
+      case 'warning':
+        return 'bg-amber-500/20 text-amber-400 border-amber-500/30';
+      case 'failed':
+        return 'bg-red-500/20 text-red-400 border-red-500/30';
+      case 'running':
+        return 'bg-blue-500/20 text-blue-400 border-blue-500/30';
+      case 'skipped':
+        return 'bg-gray-700/50 text-gray-500 border-gray-600/30';
+      default:
+        return 'bg-gray-800/50 text-gray-500 border-gray-700/30';
+    }
+  };
+
+  const getStageIcon = (status) => {
+    switch (status) {
+      case 'complete':
+        return <CheckCircle size={16} />;
+      case 'warning':
+        return <AlertTriangle size={16} />;
+      case 'failed':
+        return <XCircle size={16} />;
+      case 'running':
+        return <Loader2 size={16} className="animate-spin" />;
+      case 'skipped':
+        return <XCircle size={16} />;
+      default:
+        return <Clock size={16} />;
+    }
+  };
+
+  const getWsStatusBadge = () => {
+    switch (wsStatus) {
+      case 'connecting':
+        return (
+          <div className="flex items-center gap-2 text-xs bg-yellow-500/10 text-yellow-400 px-3 py-1.5 rounded-full border border-yellow-500/20">
+            <Loader2 size={12} className="animate-spin" />
+            <span>Connecting...</span>
+          </div>
+        );
+      case 'connected':
+        return (
+          <div className="flex items-center gap-2 text-xs bg-green-500/10 text-green-400 px-3 py-1.5 rounded-full border border-green-500/20">
+            <Wifi size={12} />
+            <span>Live</span>
+          </div>
+        );
+      case 'error':
+        return (
+          <div className="flex items-center gap-2 text-xs bg-red-500/10 text-red-400 px-3 py-1.5 rounded-full border border-red-500/20">
+            <WifiOff size={12} />
+            <span>Disconnected</span>
+          </div>
+        );
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-gray-950 z-50 flex flex-col">
+      {/* Header */}
+      <div className="bg-gradient-to-r from-gray-900 to-gray-800 px-6 py-4 border-b border-gray-800">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="relative">
+              <span className="text-3xl">{invoice.icon || '📄'}</span>
+              {!result && (
+                <div className="absolute -bottom-1 -right-1 w-3 h-3 bg-blue-500 rounded-full animate-pulse" />
+              )}
+            </div>
+            <div>
+              <h1 className="text-white font-semibold text-lg">
+                {result ? 'Processing Complete' : 'Processing Invoice'}
+              </h1>
+              <p className="text-gray-400 text-sm">
+                {invoice.name || invoice.vendor} • ${(invoice.amount || 0).toLocaleString()}
+              </p>
+            </div>
+          </div>
+          
+          {/* Tech Stack Badges */}
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 text-xs bg-purple-500/10 text-purple-400 px-3 py-1.5 rounded-full border border-purple-500/20">
+              <Cpu size={12} />
+              <span>xAI Grok</span>
+            </div>
+            <div className="flex items-center gap-2 text-xs bg-pink-500/10 text-pink-400 px-3 py-1.5 rounded-full border border-pink-500/20">
+              <GitBranch size={12} />
+              <span>LangGraph StateGraph</span>
+            </div>
+            {getWsStatusBadge()}
+            {tokenUsage.total.total_tokens > 0 && (
+              <div className="flex items-center gap-2 text-xs bg-emerald-500/10 text-emerald-400 px-3 py-1.5 rounded-full border border-emerald-500/20">
+                <Coins size={12} />
+                <span>{tokenUsage.total.total_tokens.toLocaleString()} tokens</span>
+              </div>
+            )}
+            {!result ? (
+              <div className="flex items-center gap-2 text-blue-400 text-sm bg-blue-500/10 px-3 py-1.5 rounded-full">
+                <Loader2 className="animate-spin" size={14} />
+                <span>Running...</span>
+              </div>
+            ) : (
+              <div className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded-full ${
+                result.status === 'approved' 
+                  ? 'text-green-400 bg-green-500/10' 
+                  : result.status === 'error'
+                  ? 'text-orange-400 bg-orange-500/10'
+                  : 'text-red-400 bg-red-500/10'
+              }`}>
+                {result.status === 'approved' ? <CheckCircle size={14} /> : <XCircle size={14} />}
+                <span>{result.status === 'approved' ? 'Complete' : result.status === 'error' ? 'Error' : 'Rejected'}</span>
+              </div>
+            )}
+            <div className="text-gray-500 text-sm font-mono">
+              {getElapsedTime()}s
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* LangGraph Pipeline Visualization */}
+      <div className="bg-gray-900/50 px-6 py-4 border-b border-gray-800">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2 text-xs text-gray-500">
+            <GitBranch size={14} />
+            <span>LangGraph StateGraph Flow</span>
+          </div>
+          <div className="text-xs text-gray-500 font-mono">
+            workflow.compile() → app.invoke(state)
+          </div>
+        </div>
+        <div className="flex items-center justify-center gap-3">
+          {stages.map((stage, idx) => (
+            <div key={stage.id} className="flex items-center">
+              <div className={`flex items-center gap-2.5 px-4 py-2.5 rounded-xl border transition-all ${getStageStyles(stageStatus[idx])}`}>
+                {getStageIcon(stageStatus[idx])}
+                <div>
+                  <div className="text-sm font-medium">{stage.label}</div>
+                  <div className="text-xs opacity-70">{stage.description}</div>
+                </div>
+              </div>
+              {idx < stages.length - 1 && (
+                <div className="flex items-center mx-2">
+                  <ArrowRight size={18} className={`${
+                    stageStatus[idx] === 'complete' || stageStatus[idx] === 'warning'
+                      ? 'text-gray-500'
+                      : 'text-gray-700'
+                  }`} />
+                  {idx === 0 && <span className="text-[10px] text-gray-600 ml-1">edge</span>}
+                </div>
+              )}
+            </div>
+          ))}
+          <div className="flex items-center ml-2">
+            <ArrowRight size={18} className="text-gray-700" />
+            <div className="ml-2 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 text-sm">
+              END
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Left: Raw Input */}
+        <div className="w-1/5 border-r border-gray-800 flex flex-col bg-gray-900/30">
+          <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-2">
+            <span className="text-lg">{invoice.isPdf ? '📄' : '📝'}</span>
+            <h3 className="text-white font-medium text-sm">
+              {invoice.isPdf ? 'PDF Input' : 'Raw Input'}
+            </h3>
+            {invoice.isPdf && (
+              <span className="ml-auto text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded-full flex items-center gap-1">
+                <FileText size={10} />
+                PDF
+              </span>
+            )}
+            {invoice.id === 'test-2' && (
+              <span className="ml-auto text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full flex items-center gap-1">
+                <RefreshCw size={10} />
+                Messy
+              </span>
+            )}
+          </div>
+          <div className="flex-1 p-4 overflow-auto">
+            {invoice.isPdf ? (
+              <div className="space-y-4">
+                <div className="bg-gray-800/50 rounded-lg p-4 text-center">
+                  <div className="w-16 h-16 bg-blue-500/20 rounded-full flex items-center justify-center mx-auto mb-3">
+                    <FileText size={28} className="text-blue-400" />
+                  </div>
+                  <p className="text-white font-medium">{invoice.originalFilename || invoice.name}</p>
+                  <p className="text-gray-500 text-sm mt-1">PDF file uploaded</p>
+                </div>
+                <div className="bg-gray-800/30 rounded-lg px-3 py-2">
+                  <p className="text-xs text-gray-500 mb-1">File path:</p>
+                  <p className="text-xs text-gray-400 font-mono break-all">{invoice.filePath || invoice.rawText}</p>
+                </div>
+                <div className="text-xs text-gray-500 flex items-center gap-2">
+                  <Sparkles size={12} className="text-purple-400" />
+                  <span>Text will be extracted by pdfplumber and sent to Grok</span>
+                </div>
+              </div>
+            ) : (
+              <pre className="text-gray-300 font-mono text-sm whitespace-pre-wrap leading-relaxed">
+                {invoice.rawText}
+              </pre>
+            )}
+          </div>
+        </div>
+
+        {/* Center: Extracted Data + JSON */}
+        <div className="w-2/5 border-r border-gray-800 flex flex-col bg-gray-900/20">
+          <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-2">
+            <span className="text-lg">📊</span>
+            <h3 className="text-white font-medium text-sm">Extracted Data</h3>
+            {extractedData && (
+              <span className="ml-auto text-xs text-green-400">
+                <Sparkles size={12} className="inline mr-1" />
+                Grok JSON Mode
+              </span>
+            )}
+          </div>
+          <div className="flex-1 overflow-auto">
+            {extractedData ? (
+              <div className="p-4">
+                {/* Confidence Badge */}
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-xs text-gray-500 uppercase tracking-wide">AI Confidence</span>
+                  <div className={`flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full ${
+                    extractedData.confidence >= 90 ? 'bg-green-500/20 text-green-400' :
+                    extractedData.confidence >= 70 ? 'bg-amber-500/20 text-amber-400' :
+                    'bg-red-500/20 text-red-400'
+                  }`}>
+                    <Sparkles size={10} />
+                    {extractedData.confidence}%
+                  </div>
+                </div>
+                
+                {/* Flags */}
+                {extractedData.flags?.length > 0 && (
+                  <div className="mb-3 flex flex-wrap gap-1">
+                    {extractedData.flags.map((flag, idx) => (
+                      <span key={idx} className="text-[10px] px-2 py-0.5 bg-amber-500/20 text-amber-400 rounded-full">
+                        {flag}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                
+                {/* Extracted Fields */}
+                <div className="space-y-3 mb-4">
+                  <DataField label="Invoice #" value={extractedData.invoiceNumber} />
+                  <DataField label="Vendor" value={extractedData.vendor} />
+                  <DataField 
+                    label="Amount" 
+                    value={`$${(extractedData.amount || 0).toLocaleString()} ${extractedData.currency}`}
+                    highlight={extractedData.amount > 10000}
+                  />
+                  <div className="grid grid-cols-2 gap-2">
+                    <DataField label="Invoice Date" value={extractedData.invoiceDate || '—'} small />
+                    <DataField 
+                      label="Due Date" 
+                      value={extractedData.dueDate || '—'} 
+                      error={!extractedData.dueDate}
+                      small
+                    />
+                  </div>
+                  {extractedData.paymentTerms && (
+                    <DataField label="Payment Terms" value={extractedData.paymentTerms} />
+                  )}
+                  {extractedData.poNumber && (
+                    <DataField label="PO Number" value={extractedData.poNumber} />
+                  )}
+                  
+                  {/* Bill From */}
+                  {extractedData.billFrom?.name && (
+                    <div className="pt-2 border-t border-gray-800">
+                      <span className="text-gray-500 text-xs uppercase tracking-wide">Bill From (Vendor)</span>
+                      <div className="mt-2 bg-gray-800/50 rounded-lg px-3 py-2 space-y-1">
+                        <div className="text-white text-sm font-medium">{extractedData.billFrom.name}</div>
+                        {extractedData.billFrom.address && (
+                          <div className="text-gray-400 text-xs">{extractedData.billFrom.address}</div>
+                        )}
+                        {extractedData.billFrom.email && (
+                          <div className="text-gray-400 text-xs">{extractedData.billFrom.email}</div>
+                        )}
+                        {extractedData.billFrom.phone && (
+                          <div className="text-gray-400 text-xs">{extractedData.billFrom.phone}</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Bill To */}
+                  {extractedData.billTo?.name && (
+                    <div className="pt-2 border-t border-gray-800">
+                      <span className="text-gray-500 text-xs uppercase tracking-wide">Bill To (Customer)</span>
+                      <div className="mt-2 bg-gray-800/50 rounded-lg px-3 py-2 space-y-1">
+                        <div className="text-white text-sm font-medium">{extractedData.billTo.name}</div>
+                        {extractedData.billTo.address && (
+                          <div className="text-gray-400 text-xs">{extractedData.billTo.address}</div>
+                        )}
+                        {extractedData.billTo.entity && (
+                          <div className="text-gray-400 text-xs">{extractedData.billTo.entity}</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Line Items */}
+                  <div className="pt-2 border-t border-gray-800">
+                    <span className="text-gray-500 text-xs uppercase tracking-wide">Line Items</span>
+                    <div className="mt-2 space-y-2">
+                      {(extractedData.items || []).map((item, idx) => (
+                        <div key={idx} className="bg-gray-800/50 rounded-lg px-3 py-2">
+                          <div className="flex items-center justify-between">
+                            <div className="text-white text-sm font-medium">
+                              {item.description || item.name}
+                            </div>
+                            {item.amount > 0 && (
+                              <div className="text-green-400 text-sm font-medium">
+                                ${item.amount.toLocaleString()}
+                              </div>
+                            )}
+                          </div>
+                          <div className="text-gray-400 text-xs flex items-center gap-2 mt-1">
+                            <span>Qty: {item.quantity}</span>
+                            {item.unit_price > 0 && (
+                              <span>@ ${item.unit_price.toLocaleString()}/ea</span>
+                            )}
+                            {item.sku && (
+                              <span className="text-gray-500">SKU: {item.sku}</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* JSON Output Preview */}
+                {currentJsonOutput && (
+                  <div className="mt-4 border-t border-gray-800 pt-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Braces size={14} className="text-cyan-400" />
+                      <span className="text-xs text-cyan-400 uppercase tracking-wide">
+                        {currentJsonOutput.stage} Agent Output
+                      </span>
+                    </div>
+                    <pre className="bg-gray-950 rounded-lg p-3 text-xs font-mono text-cyan-300 overflow-auto max-h-48">
+                      {JSON.stringify(currentJsonOutput.data, null, 2)}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full text-gray-500">
+                <Loader2 className="animate-spin mb-2" size={24} />
+                <span className="text-sm">Waiting for Grok extraction...</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Right: Agent Log / State */}
+        <div className="flex-1 flex flex-col bg-gray-950">
+          {/* Tab Switcher */}
+          <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-1">
+            <button
+              onClick={() => setActivePanel('log')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                activePanel === 'log' 
+                  ? 'bg-blue-500/20 text-blue-400' 
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              <Code size={12} />
+              Agent Log
+            </button>
+            <button
+              onClick={() => setActivePanel('state')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                activePanel === 'state' 
+                  ? 'bg-pink-500/20 text-pink-400' 
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              <GitBranch size={12} />
+              LangGraph State
+            </button>
+          </div>
+
+          {/* Log Panel */}
+          {activePanel === 'log' && (
+            <div className="flex-1 p-4 overflow-auto font-mono text-sm">
+              {logs.map((log, idx) => (
+                <div key={idx} className="flex gap-3 mb-0.5 hover:bg-gray-900/50 px-2 py-0.5 rounded">
+                  <span className="text-gray-600 w-12 text-right shrink-0">[{log.time}s]</span>
+                  <span className={getLogColor(log.type)}>
+                    {log.type === 'json' ? (
+                      <pre className="whitespace-pre-wrap">{log.message}</pre>
+                    ) : (
+                      log.message
+                    )}
+                  </span>
+                </div>
+              ))}
+              {!result && (
+                <div className="flex items-center gap-2 text-blue-400 mt-3 px-2">
+                  <Loader2 size={12} className="animate-spin" />
+                  <span className="text-xs">Processing...</span>
+                </div>
+              )}
+              <div ref={logsEndRef} />
+            </div>
+          )}
+
+          {/* State Panel */}
+          {activePanel === 'state' && (
+            <div className="flex-1 p-4 overflow-auto">
+              <div className="mb-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <GitBranch size={14} className="text-pink-400" />
+                  <span className="text-xs text-pink-400 uppercase tracking-wide">
+                    WorkflowState (TypedDict)
+                  </span>
+                </div>
+                <pre className="bg-gray-900 rounded-lg p-4 text-xs font-mono text-gray-300 overflow-auto">
+                  {JSON.stringify(workflowState, null, 2)}
+                </pre>
+              </div>
+              
+              <div className="text-xs text-gray-500 space-y-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-pink-400"></div>
+                  <span>State is passed between agents via LangGraph edges</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-blue-400"></div>
+                  <span>Each agent receives full state, returns partial update</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-green-400"></div>
+                  <span>Conditional edges route based on validation/approval</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Result Footer - Compact */}
+      {result && (
+        <div className={`px-4 py-2.5 border-t ${
+          result.status === 'approved' || result.status === 'auto_approved'
+            ? 'bg-gradient-to-r from-green-900/30 to-green-800/20 border-green-800/30' 
+            : result.status === 'inbox'
+            ? 'bg-gradient-to-r from-blue-900/30 to-blue-800/20 border-blue-800/30'
+            : result.status === 'pending_approval'
+            ? 'bg-gradient-to-r from-amber-900/30 to-amber-800/20 border-amber-800/30'
+            : result.status === 'error'
+            ? 'bg-gradient-to-r from-orange-900/30 to-orange-800/20 border-orange-800/30'
+            : 'bg-gradient-to-r from-red-900/30 to-red-800/20 border-red-800/30'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                result.status === 'approved' || result.status === 'auto_approved' ? 'bg-green-500/20' :
+                result.status === 'inbox' ? 'bg-blue-500/20' :
+                result.status === 'pending_approval' ? 'bg-amber-500/20' :
+                result.status === 'error' ? 'bg-orange-500/20' : 'bg-red-500/20'
+              }`}>
+                {result.status === 'approved' || result.status === 'auto_approved'
+                  ? <CheckCircle className="text-green-400" size={16} />
+                  : result.status === 'inbox'
+                  ? <CheckCircle className="text-blue-400" size={16} />
+                  : result.status === 'pending_approval'
+                  ? <Clock className="text-amber-400" size={16} />
+                  : result.status === 'error'
+                  ? <AlertTriangle className="text-orange-400" size={16} />
+                  : <XCircle className="text-red-400" size={16} />
+                }
+              </div>
+              <div>
+                <div className="flex items-center gap-3">
+                  <h3 className={`font-semibold text-sm ${
+                    result.status === 'approved' || result.status === 'auto_approved' ? 'text-green-400' :
+                    result.status === 'inbox' ? 'text-blue-400' :
+                    result.status === 'pending_approval' ? 'text-amber-400' :
+                    result.status === 'error' ? 'text-orange-400' : 'text-red-400'
+                  }`}>
+                    {result.status === 'approved' 
+                      ? (result.requiresReview ? 'Approved — Flagged for Review' : 'Invoice Approved & Paid')
+                      : result.status === 'auto_approved'
+                      ? 'Auto-Approved — Ready for Payment'
+                      : result.status === 'inbox'
+                      ? 'Stage 1 Complete — Invoice in Inbox'
+                      : result.status === 'pending_approval'
+                      ? 'Routed to Approval Queue'
+                      : result.status === 'error'
+                      ? 'Processing Error'
+                      : 'Invoice Rejected'
+                    }
+                  </h3>
+                  <span className="text-gray-500 text-xs">
+                    {getElapsedTime()}s
+                    {result.tokenUsage && <> • {result.tokenUsage.total_tokens?.toLocaleString() || 0} tokens</>}
+                    {result.invoiceId && <> • {result.invoiceId}</>}
+                  </span>
+                </div>
+                <p className="text-gray-400 text-xs">
+                  {result.status === 'approved' 
+                    ? `Transaction ID: ${result.transactionId}`
+                    : result.status === 'inbox'
+                    ? result.message || 'Ready for routing to approval'
+                    : result.status === 'pending_approval'
+                    ? 'Waiting for VP/Manager approval'
+                    : result.status === 'auto_approved'
+                    ? 'Under $10K with no flags — auto-approved'
+                    : result.reason
+                  }
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => onComplete(result, extractedData, validationResult, approvalResult, {
+                logs,
+                rawText: invoice.rawText,
+                stageStatus,
+                tokenUsage,
+                workflowState,
+                processingTime: getElapsedTime(),
+                invoiceId: result.invoiceId,
+              })}
+              className={`font-medium px-4 py-1.5 text-sm rounded-lg transition-all ${
+                result.status === 'approved' || result.status === 'auto_approved'
+                  ? 'bg-green-500 hover:bg-green-400 text-white'
+                  : result.status === 'inbox'
+                  ? 'bg-blue-500 hover:bg-blue-400 text-white'
+                  : 'bg-white hover:bg-gray-100 text-gray-900'
+              }`}
+            >
+              {result.status === 'inbox' ? 'View in Inbox' : 'Continue'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DataField({ label, value, highlight, error, small }) {
+  return (
+    <div>
+      <span className={`text-gray-500 uppercase tracking-wide ${small ? 'text-[10px]' : 'text-xs'}`}>{label}</span>
+      <div className={`mt-0.5 font-medium ${
+        error ? 'text-red-400' :
+        highlight ? 'text-amber-400' :
+        'text-white'
+      } ${small ? 'text-xs' : 'text-sm'}`}>
+        {value}
+      </div>
+    </div>
+  );
+}
