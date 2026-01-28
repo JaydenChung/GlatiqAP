@@ -32,12 +32,12 @@ participants:
   active: []
   on_call: []
 
-last_updated: "2026-01-27T14:30:00Z"
+last_updated: "2026-01-27T16:30:00Z"
 
 last_session:
-  id: "2026-01-27_INGEST"
+  id: "2026-01-27_PAYMENT"
   status: CLOSED
-  outcome: "PDF parsing integrated into Ingestion Agent — pdfplumber extracts text from invoice PDFs, smart detection handles both PDF paths and raw text input"
+  outcome: "Payment Agent handoff implemented — streaming modal shows agent activity, moves invoice to Paid tab on success"
 ```
 
 ---

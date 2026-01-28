@@ -302,6 +302,101 @@ export function InvoiceProvider({ children }) {
     setPaidInvoices(prev => [paidInvoice, ...prev]);
   }, [payableInvoices]);
 
+  /**
+   * Execute payment using the Payment Agent with streaming.
+   * Called after the ProcessingView (in payment mode) completes successfully.
+   * 
+   * @param {string} invoiceId - The invoice being paid
+   * @param {Object} result - The payment result from the Payment Agent
+   * @param {boolean} result.success - Whether payment succeeded
+   * @param {string} result.transactionId - Transaction ID if successful
+   * @param {Object} result.processingTime - How long payment took
+   * @param {Object} result.tokenUsage - Token usage stats
+   * @param {Object} processingHistory - Full processing history from ProcessingView
+   * 
+   * Session: 2026-01-27_PAYMENT (Galatiq Committee)
+   */
+  const executePaymentWithAgent = useCallback((invoiceId, result, processingHistory = null) => {
+    const invoice = payableInvoices.find(inv => inv.id === invoiceId);
+    if (!invoice) return;
+
+    if (!result.success) {
+      // Payment failed - log the rejection but keep invoice in payable
+      console.error('Payment failed:', result.error);
+      // Could add to a failed payments list or update invoice with error
+      return;
+    }
+
+    // Merge payment processing history with existing history
+    const mergedHistory = {
+      ...(invoice.processingHistory || {}),
+      // Add payment stage logs
+      logs: [
+        ...(invoice.processingHistory?.logs || []),
+        ...(processingHistory?.logs || []).map(log => ({
+          ...log,
+          stage: 'payment',
+        })),
+      ],
+      // Update stage status to include payment
+      stageStatus: ['complete', 'complete', 'complete', 'complete'],
+      // Merge token usage
+      tokenUsage: {
+        total: {
+          prompt_tokens: (invoice.processingHistory?.tokenUsage?.total?.prompt_tokens || 0) + (processingHistory?.tokenUsage?.total?.prompt_tokens || 0),
+          completion_tokens: (invoice.processingHistory?.tokenUsage?.total?.completion_tokens || 0) + (processingHistory?.tokenUsage?.total?.completion_tokens || 0),
+          total_tokens: (invoice.processingHistory?.tokenUsage?.total?.total_tokens || 0) + (processingHistory?.tokenUsage?.total?.total_tokens || 0),
+        },
+        byStage: {
+          ...(invoice.processingHistory?.tokenUsage?.byStage || {}),
+          ...(processingHistory?.tokenUsage?.byStage || {}),
+        },
+      },
+      // Update workflow state
+      workflowState: {
+        ...(invoice.processingHistory?.workflowState || {}),
+        ...(processingHistory?.workflowState || {}),
+        payment_result: {
+          success: true,
+          transaction_id: result.transactionId,
+        },
+        current_agent: 'complete',
+        status: 'completed',
+      },
+      paymentProcessedAt: new Date().toISOString(),
+      paymentProcessingTime: processingHistory?.processingTime || result.processingTime,
+      // Calculate total processing time
+      processingTime: (
+        parseFloat(invoice.processingHistory?.processingTime || 0) + 
+        parseFloat(processingHistory?.processingTime || 0)
+      ).toFixed(1),
+    };
+
+    // Payment succeeded - move to paid
+    const paidInvoice = {
+      ...invoice,
+      status: 'paid',
+      paidAt: new Date().toISOString(),
+      transactionId: result.transactionId,
+      paymentMethod: invoice.paymentMethod || 'ACH',
+      paymentAgentResult: result,
+      processingHistory: mergedHistory,
+      aiResult: {
+        ...(invoice.aiResult || {}),
+        status: 'paid',
+        transactionId: result.transactionId,
+        payment: {
+          success: true,
+          transactionId: result.transactionId,
+          processedAt: new Date().toISOString(),
+        },
+      },
+    };
+
+    setPayableInvoices(prev => prev.filter(inv => inv.id !== invoiceId));
+    setPaidInvoices(prev => [paidInvoice, ...prev]);
+  }, [payableInvoices]);
+
   const updatePaymentMethod = useCallback((invoiceId, method) => {
     setPayableInvoices(prev => prev.map(invoice => {
       if (invoice.id !== invoiceId) return invoice;
@@ -335,6 +430,7 @@ export function InvoiceProvider({ children }) {
     rejectByCurrentApprover,
     schedulePayment,
     markAsPaid,
+    executePaymentWithAgent,
     updatePaymentMethod,
     resetAllData,
   };

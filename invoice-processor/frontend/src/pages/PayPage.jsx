@@ -14,9 +14,11 @@ import {
   CheckCircle,
   Clock,
   Lock,
-  FileText
+  FileText,
+  Zap
 } from 'lucide-react';
 import { useInvoices } from '../context/InvoiceContext';
+import ProcessingView from '../components/ProcessingView';
 
 const tabs = [
   { id: 'ready_to_pay', label: 'Ready to Pay', icon: FileText },
@@ -32,12 +34,47 @@ export default function PayPage() {
     paidInvoices, 
     schedulePayment, 
     markAsPaid, 
-    updatePaymentMethod 
+    updatePaymentMethod,
+    executePaymentWithAgent 
   } = useInvoices();
   
   const [activeTab, setActiveTab] = useState('ready_to_pay');
   const [showFilters, setShowFilters] = useState(false);
   const [selectedItems, setSelectedItems] = useState([]);
+  
+  // Payment processing view state
+  const [showPaymentProcessing, setShowPaymentProcessing] = useState(false);
+  const [processingInvoice, setProcessingInvoice] = useState(null);
+
+  // Handle opening payment processing view
+  const handleExecutePayment = (invoice) => {
+    setProcessingInvoice(invoice);
+    setShowPaymentProcessing(true);
+  };
+
+  // Handle payment completion from ProcessingView
+  const handlePaymentComplete = (result, extractedData, validationResult, approvalResult, processingHistory) => {
+    if (result.status === 'paid' && processingInvoice) {
+      // Use the agent-based payment handler
+      if (executePaymentWithAgent) {
+        executePaymentWithAgent(processingInvoice.id, {
+          success: true,
+          transactionId: result.transactionId,
+          processingTime: processingHistory?.processingTime,
+          tokenUsage: result.tokenUsage,
+        }, processingHistory);
+      } else {
+        markAsPaid(processingInvoice.id);
+      }
+    }
+    setShowPaymentProcessing(false);
+    setProcessingInvoice(null);
+    
+    // Navigate to paid tab if successful
+    if (result.status === 'paid') {
+      setActiveTab('paid');
+    }
+  };
 
   // Filter invoices based on status
   const readyToPay = payableInvoices.filter(inv => inv.status === 'ready_to_pay');
@@ -487,7 +524,7 @@ export default function PayPage() {
                           <option value="Check">Check</option>
                         </select>
                       </td>
-                      <td className="py-3 px-3">
+                        <td className="py-3 px-3">
                         <div className="flex items-center gap-2">
                           <button
                             onClick={() => navigate(`/invoice/${invoice.id}`)}
@@ -496,20 +533,13 @@ export default function PayPage() {
                             <Eye size={14} />
                             View
                           </button>
-                          {invoice.status === 'ready_to_pay' && (
+                          {(invoice.status === 'ready_to_pay' || invoice.status === 'scheduled') && activeTab === 'ready_to_pay' && (
                             <button
-                              onClick={() => schedulePayment(invoice.id)}
-                              className="text-xs px-2 py-1 bg-teal-500 text-white rounded hover:bg-teal-600"
+                              onClick={() => handleExecutePayment(invoice)}
+                              className="flex items-center gap-1 text-xs px-3 py-1.5 bg-teal-500 text-white rounded-lg hover:bg-teal-600 transition-colors font-medium"
                             >
-                              Schedule
-                            </button>
-                          )}
-                          {invoice.status === 'scheduled' && (
-                            <button
-                              onClick={() => markAsPaid(invoice.id)}
-                              className="text-xs px-2 py-1 bg-green-500 text-white rounded hover:bg-green-600"
-                            >
-                              Pay Now
+                              <Zap size={12} />
+                              Execute Payment
                             </button>
                           )}
                         </div>
@@ -640,6 +670,25 @@ export default function PayPage() {
 
       {/* Table */}
       {renderTable()}
+
+      {/* Payment Processing View (full screen like other agents) */}
+      {showPaymentProcessing && processingInvoice && (
+        <ProcessingView
+          invoice={processingInvoice}
+          onComplete={handlePaymentComplete}
+          paymentMode={true}
+          existingData={{
+            extractedData: {
+              invoiceNumber: processingInvoice.invoiceNumber,
+              vendor: processingInvoice.vendor,
+              amount: processingInvoice.amount,
+              dueDate: processingInvoice.dueDate,
+              items: processingInvoice.lineItems || [],
+            },
+            validationResult: processingInvoice.aiValidation,
+          }}
+        />
+      )}
     </div>
   );
 }
