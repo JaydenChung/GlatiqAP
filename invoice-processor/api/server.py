@@ -53,6 +53,13 @@ from src.workflow import (
     run_payment_workflow,
 )
 from src.schemas.models import InvoiceStatus, APPROVAL_THRESHOLDS
+from src.tools.database import (
+    init_database,
+    get_all_vendors,
+    get_vendor_by_id,
+    lookup_vendor_by_name,
+    get_vendor_stats,
+)
 
 
 # =============================================================================
@@ -327,6 +334,67 @@ async def serve_uploaded_file(file_name: str):
             "Cache-Control": "public, max-age=3600",  # Cache for 1 hour
         }
     )
+
+
+# =============================================================================
+# VENDOR API ENDPOINTS (Session 2026-01-27_PERSIST)
+# =============================================================================
+
+@app.get("/api/vendors")
+async def list_vendors():
+    """
+    List all vendors from the Vendor Master database.
+    
+    Returns vendor profiles with contact info, payment terms,
+    compliance status, and risk levels.
+    """
+    vendors = get_all_vendors()
+    stats = get_vendor_stats()
+    
+    return {
+        "vendors": vendors,
+        "stats": stats,
+    }
+
+
+@app.get("/api/vendors/stats")
+async def vendor_statistics():
+    """Get vendor dashboard statistics."""
+    return get_vendor_stats()
+
+
+@app.get("/api/vendors/{vendor_id}")
+async def get_vendor(vendor_id: str):
+    """Get a specific vendor by ID."""
+    vendor = get_vendor_by_id(vendor_id)
+    if not vendor:
+        raise HTTPException(status_code=404, detail=f"Vendor {vendor_id} not found")
+    return vendor
+
+
+@app.get("/api/vendors/lookup/{name}")
+async def lookup_vendor(name: str):
+    """
+    Look up a vendor by name or alias.
+    
+    This is used by the Validation Agent to enrich invoice data
+    with vendor contact information.
+    """
+    vendor = lookup_vendor_by_name(name)
+    if not vendor:
+        return {
+            "found": False,
+            "query": name,
+            "vendor": None,
+            "message": f"No vendor found matching '{name}'",
+        }
+    
+    return {
+        "found": True,
+        "query": name,
+        "vendor": vendor,
+        "message": f"Found vendor: {vendor['name']} ({vendor['vendor_id']})",
+    }
 
 
 # =============================================================================
@@ -726,8 +794,14 @@ async def process_invoice_stream(request: ProcessRequest):
 @app.on_event("startup")
 async def startup_event():
     """Initialize on startup."""
+    # Initialize database with vendors and inventory
+    init_database(force_reset=False)  # Don't reset - preserve existing data
+    
     # Share invoice store with streaming workflow module
     set_invoice_store(invoice_store)
+    
+    # Get vendor stats for display
+    stats = get_vendor_stats()
     
     print()
     print("╔" + "═" * 58 + "╗")
@@ -743,6 +817,12 @@ async def startup_event():
     print("  POST /api/invoices/{id}/reject       → Human rejects")
     print("  POST /api/invoices/{id}/execute-payment → Stage 3: Payment")
     print()
+    print("Vendor Master Endpoints:")
+    print("  GET  /api/vendors                    → List all vendors")
+    print("  GET  /api/vendors/{id}               → Get vendor by ID")
+    print("  GET  /api/vendors/lookup/{name}      → Lookup by name/alias")
+    print()
+    print(f"Database: {stats['total_vendors']} vendors, {stats['compliant']} compliant")
     print(f"Auto-approve threshold: <${APPROVAL_THRESHOLDS['auto_approve_max']:,}")
     print()
 

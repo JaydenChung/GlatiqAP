@@ -271,6 +271,21 @@ async def process_invoice_streaming(raw_invoice: str, invoice_id: str = None) ->
         val_data = state.get("validation_result", {})
         inventory_check = val_data.get("inventory_check", {})
         corrections = val_data.get("corrections", {})
+        enrichments = val_data.get("enrichments", {})
+        matched_vendor = val_data.get("matched_vendor")
+        
+        # Log vendor matching
+        if matched_vendor:
+            yield log_event("success", f"🏢 Vendor matched: {matched_vendor}")
+            if enrichments:
+                yield log_event("info", f"   📝 Enriched {len(enrichments)} field(s) from vendor profile:")
+                for field, enrich in enrichments.items():
+                    yield log_event("success", f"      • {field}: {enrich.get('enriched')}")
+        else:
+            invoice_vendor = state.get("invoice_data", {}).get("vendor", "Unknown")
+            yield log_event("warning", f"🏢 Vendor '{invoice_vendor}' not found in database")
+        
+        yield log_event("info", "")
         
         # Yield inventory check results
         for item_name, check in inventory_check.items():

@@ -26,8 +26,84 @@ import src  # noqa: F401 - triggers path setup in __init__.py
 
 from src.client import call_grok
 from src.schemas.models import WorkflowState, ValidationResult
-from src.tools.database import validate_inventory
+from src.tools.database import validate_inventory, lookup_vendor_by_name
 from src.utils import clean_json_response
+
+
+# =============================================================================
+# VENDOR ENRICHMENT LOGIC (Session 2026-01-27_PERSIST)
+# =============================================================================
+
+def enrich_invoice_from_vendor(invoice_data: dict, vendor_profile: dict) -> dict:
+    """
+    Enrich invoice data with missing fields from vendor master profile.
+    
+    This fills in gaps that the ingestion agent couldn't extract from the PDF,
+    using our stored vendor information.
+    
+    Args:
+        invoice_data: The extracted invoice data (may have missing fields)
+        vendor_profile: The vendor profile from our database
+        
+    Returns:
+        Dict of enrichments made: {field: {original, enriched, source}}
+    """
+    enrichments = {}
+    
+    # Get or create bill_from structure
+    bill_from = invoice_data.get("bill_from") or {}
+    if isinstance(bill_from, str):
+        # If bill_from is just a string, convert to dict
+        bill_from = {"name": bill_from}
+    
+    # Fields to potentially enrich from vendor profile
+    field_mappings = [
+        # (invoice_field, vendor_field, bill_from_field)
+        ("phone", "phone", "phone"),
+        ("email", "email", "email"),
+        ("address", "address", "address"),
+        ("city", "city", None),
+        ("state", "state", None),
+        ("zip_code", "zip_code", None),
+    ]
+    
+    for invoice_field, vendor_field, bill_from_field in field_mappings:
+        vendor_value = vendor_profile.get(vendor_field)
+        
+        if not vendor_value:
+            continue  # Vendor doesn't have this field either
+        
+        # Check if invoice is missing this field
+        invoice_value = invoice_data.get(invoice_field)
+        bill_from_value = bill_from.get(bill_from_field) if bill_from_field else None
+        
+        # If both invoice root and bill_from are missing this value, enrich it
+        if not invoice_value and not bill_from_value:
+            # Add to bill_from if applicable
+            if bill_from_field:
+                bill_from[bill_from_field] = vendor_value
+            
+            enrichments[invoice_field] = {
+                "original": None,
+                "enriched": vendor_value,
+                "source": f"Vendor Master ({vendor_profile.get('vendor_id')})",
+            }
+    
+    # Also enrich payment_terms if missing and vendor has it
+    if not invoice_data.get("payment_terms") and vendor_profile.get("payment_terms"):
+        enrichments["payment_terms_from_vendor"] = {
+            "original": invoice_data.get("payment_terms"),
+            "enriched": vendor_profile.get("payment_terms"),
+            "source": f"Vendor Master ({vendor_profile.get('vendor_id')})",
+        }
+        # Note: We don't override payment_terms here as the date-based calculation is more accurate
+        # But we note it for reference
+    
+    # Update bill_from in invoice_data if we made changes
+    if bill_from and any(k in enrichments for k in ["phone", "email", "address"]):
+        invoice_data["bill_from"] = bill_from
+    
+    return enrichments
 
 
 # =============================================================================
@@ -347,6 +423,7 @@ def validation_agent(state: WorkflowState) -> dict:
     # Make a mutable copy of invoice_data for corrections
     corrected_invoice_data = dict(invoice_data)
     corrections = {}  # Track all corrections made
+    enrichments = {}  # Track vendor enrichments
     
     vendor = invoice_data.get("vendor", "UNKNOWN")
     amount = invoice_data.get("amount", 0.0)
@@ -364,7 +441,50 @@ def validation_agent(state: WorkflowState) -> dict:
     print()
     
     # =========================================================================
-    # STEP 0: SMART FIELD CORRECTIONS
+    # STEP 0A: VENDOR ENRICHMENT FROM DATABASE
+    # =========================================================================
+    print("   🏢 Looking up vendor in database...")
+    
+    vendor_profile = lookup_vendor_by_name(vendor)
+    
+    if vendor_profile:
+        print(f"      ✅ Found vendor: {vendor_profile['name']} ({vendor_profile['vendor_id']})")
+        
+        # Check vendor status
+        if vendor_profile.get("status") == "suspended":
+            print(f"      ⚠️  WARNING: Vendor is SUSPENDED!")
+        
+        # Enrich invoice with missing fields from vendor profile
+        enrichments = enrich_invoice_from_vendor(corrected_invoice_data, vendor_profile)
+        
+        if enrichments:
+            print(f"      📝 Enriched {len(enrichments)} field(s) from vendor profile:")
+            for field, enrich_data in enrichments.items():
+                print(f"         • {field}: {enrich_data['enriched']} (from {enrich_data['source']})")
+            
+            # Add enrichments to corrections for tracking
+            for field, enrich_data in enrichments.items():
+                corrections[field] = {
+                    "original": enrich_data["original"],
+                    "corrected": enrich_data["enriched"],
+                    "reason": f"Enriched from {enrich_data['source']}",
+                    "enrichment_type": "vendor_master",
+                }
+        else:
+            print("      ✓ No missing fields to enrich")
+        
+        # Store vendor_id for reference
+        corrected_invoice_data["matched_vendor_id"] = vendor_profile["vendor_id"]
+        corrected_invoice_data["vendor_status"] = vendor_profile.get("status")
+        corrected_invoice_data["vendor_risk_level"] = vendor_profile.get("risk_level")
+    else:
+        print(f"      ❌ Vendor not found in database: '{vendor}'")
+        print("         Invoice will proceed but vendor cannot be enriched")
+    
+    print()
+    
+    # =========================================================================
+    # STEP 0B: SMART FIELD CORRECTIONS
     # =========================================================================
     print("   🔧 Checking for field corrections...")
     
@@ -481,17 +601,29 @@ def validation_agent(state: WorkflowState) -> dict:
         for field, correction in corrections.items():
             print(f"      • {field}: \"{correction['original']}\" → \"{correction['corrected']}\"")
     
+    # Add vendor-related warnings if applicable
+    if vendor_profile:
+        if vendor_profile.get("status") == "suspended":
+            errors.append(f"VENDOR: {vendor} is SUSPENDED in vendor master — do not process")
+            is_valid = False
+        if vendor_profile.get("risk_level") == "high":
+            warnings.append(f"VENDOR: {vendor} is flagged as HIGH RISK")
+        if vendor_profile.get("compliance_status") != "complete":
+            warnings.append(f"VENDOR: {vendor} has incomplete compliance documentation")
+    
     validation_result: ValidationResult = {
         "is_valid": is_valid,
         "errors": errors,
         "warnings": warnings,
         "inventory_check": inventory_check,
-        "corrections": corrections,  # NEW: Track all corrections made
+        "corrections": corrections,  # Includes both corrections and enrichments
+        "matched_vendor": vendor_profile.get("vendor_id") if vendor_profile else None,
+        "enrichments": enrichments,  # Separate tracking of enrichments
     }
     
     return {
         "validation_result": validation_result,
-        "invoice_data": corrected_invoice_data,  # Return corrected invoice data
+        "invoice_data": corrected_invoice_data,  # Return corrected/enriched invoice data
         "current_agent": "approval",
     }
 

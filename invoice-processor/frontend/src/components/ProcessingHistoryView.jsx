@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { 
   CheckCircle, 
   XCircle, 
@@ -39,10 +39,19 @@ const fieldToLogPatterns = {
   'Amount': ['Amount:', 'amount', '$'],
 };
 
+// Stage colors for visual distinction
+const stageColors = {
+  ingestion: { bg: 'bg-blue-500/20', border: 'border-blue-500', text: 'text-blue-400' },
+  validation: { bg: 'bg-teal-500/20', border: 'border-teal-500', text: 'text-teal-400' },
+  approval: { bg: 'bg-purple-500/20', border: 'border-purple-500', text: 'text-purple-400' },
+  payment: { bg: 'bg-green-500/20', border: 'border-green-500', text: 'text-green-400' },
+};
+
 export default function ProcessingHistoryView({ invoice, onClose, highlightField }) {
   const history = invoice.processingHistory;
   const logRefs = useRef([]);
   const logContainerRef = useRef(null);
+  const [selectedStage, setSelectedStage] = useState(null); // Track which stage is selected
   
   const extractedData = {
     vendor: invoice.vendor,
@@ -75,9 +84,55 @@ export default function ProcessingHistoryView({ invoice, onClose, highlightField
     return matches;
   };
 
+  // Find log entries that belong to a specific stage using the stage metadata
+  const findStageLogIndices = (logs, stageId) => {
+    if (!stageId || !logs) return [];
+    
+    const matches = [];
+    
+    logs.forEach((log, idx) => {
+      // Use the stage property directly - this is the source of truth
+      if (log.stage === stageId) {
+        matches.push(idx);
+      }
+    });
+    
+    return matches;
+  };
+
+  // Get stage log indices for the selected stage
+  const stageLogIndices = selectedStage 
+    ? findStageLogIndices(history?.logs, selectedStage)
+    : [];
+
   const matchingLogIndices = highlightField 
     ? findMatchingLogIndices(history?.logs, highlightField.name)
     : [];
+
+  // Handle stage click - scroll to first log for that stage
+  const handleStageClick = (stageId, stageStatus) => {
+    // Only allow clicking on completed or warning stages
+    if (stageStatus !== 'complete' && stageStatus !== 'warning') return;
+    
+    // Toggle selection
+    if (selectedStage === stageId) {
+      setSelectedStage(null);
+      return;
+    }
+    
+    setSelectedStage(stageId);
+    
+    // Find the first log for this stage
+    const indices = findStageLogIndices(history?.logs, stageId);
+    if (indices.length > 0 && logRefs.current[indices[0]]) {
+      setTimeout(() => {
+        logRefs.current[indices[0]]?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+        });
+      }, 100);
+    }
+  };
 
   // Scroll to the first matching log when highlightField changes
   useEffect(() => {
@@ -90,6 +145,13 @@ export default function ProcessingHistoryView({ invoice, onClose, highlightField
       }, 300);
     }
   }, [highlightField, matchingLogIndices]);
+
+  // Clear selected stage when highlightField is set
+  useEffect(() => {
+    if (highlightField) {
+      setSelectedStage(null);
+    }
+  }, [highlightField]);
 
   const getLogColor = (type) => {
     switch (type) {
@@ -254,23 +316,42 @@ export default function ProcessingHistoryView({ invoice, onClose, highlightField
           </div>
         </div>
         <div className="flex items-center justify-center gap-3">
-          {stages.map((stage, idx) => (
-            <div key={stage.id} className="flex items-center">
-              <div className={`flex items-center gap-2.5 px-4 py-2.5 rounded-xl border transition-all ${getStageStyles(stageStatus?.[idx] || 'complete')}`}>
-                {getStageIcon(stageStatus?.[idx] || 'complete')}
-                <div>
-                  <div className="text-sm font-medium">{stage.label}</div>
-                  <div className="text-xs opacity-70">{stage.description}</div>
-                </div>
+          {stages.map((stage, idx) => {
+            const status = stageStatus?.[idx] || 'pending';
+            const isClickable = status === 'complete' || status === 'warning';
+            const isSelected = selectedStage === stage.id;
+            
+            return (
+              <div key={stage.id} className="flex items-center">
+                <button
+                  onClick={() => handleStageClick(stage.id, status)}
+                  disabled={!isClickable}
+                  className={`flex items-center gap-2.5 px-4 py-2.5 rounded-xl border transition-all ${getStageStyles(status)} ${
+                    isClickable 
+                      ? 'cursor-pointer hover:scale-105 hover:shadow-lg hover:shadow-green-500/20' 
+                      : 'cursor-default opacity-60'
+                  } ${
+                    isSelected 
+                      ? 'ring-2 ring-white/50 scale-105 shadow-lg shadow-green-500/30' 
+                      : ''
+                  }`}
+                  title={isClickable ? `Click to jump to ${stage.label} logs` : `${stage.label} not yet run`}
+                >
+                  {getStageIcon(status)}
+                  <div className="text-left">
+                    <div className="text-sm font-medium">{stage.label}</div>
+                    <div className="text-xs opacity-70">{stage.description}</div>
+                  </div>
+                </button>
+                {idx < stages.length - 1 && (
+                  <div className="flex items-center mx-2">
+                    <ArrowRight size={18} className="text-gray-500" />
+                    {idx === 0 && <span className="text-[10px] text-gray-600 ml-1">edge</span>}
+                  </div>
+                )}
               </div>
-              {idx < stages.length - 1 && (
-                <div className="flex items-center mx-2">
-                  <ArrowRight size={18} className="text-gray-500" />
-                  {idx === 0 && <span className="text-[10px] text-gray-600 ml-1">edge</span>}
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
           <div className="flex items-center ml-2">
             <ArrowRight size={18} className="text-gray-500" />
             <div className="ml-2 px-3 py-2 rounded-lg bg-green-500/20 border border-green-500/30 text-green-400 text-sm">
@@ -278,6 +359,26 @@ export default function ProcessingHistoryView({ invoice, onClose, highlightField
             </div>
           </div>
         </div>
+        
+        {/* Stage selection indicator */}
+        {selectedStage && (
+          <div className="flex items-center justify-center mt-3">
+            <div className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-full border ${
+              stageColors[selectedStage]?.bg || 'bg-green-500/20'
+            } ${stageColors[selectedStage]?.text || 'text-green-400'} ${
+              stageColors[selectedStage]?.border ? `border-${selectedStage === 'ingestion' ? 'blue' : selectedStage === 'validation' ? 'teal' : selectedStage === 'approval' ? 'purple' : 'green'}-500/30` : 'border-green-500/30'
+            }`}>
+              <Target size={12} />
+              <span>Showing logs for: <strong className="capitalize">{selectedStage}</strong> Agent</span>
+              <button 
+                onClick={() => setSelectedStage(null)}
+                className="ml-1 hover:bg-white/10 rounded p-0.5"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Main Content */}
@@ -374,20 +475,34 @@ export default function ProcessingHistoryView({ invoice, onClose, highlightField
             
             {logs?.length > 0 ? (
               logs.map((log, idx) => {
-                const isHighlighted = matchingLogIndices.includes(idx);
+                const isFieldHighlighted = matchingLogIndices.includes(idx);
+                const isStageHighlighted = stageLogIndices.includes(idx);
+                const isHighlighted = isFieldHighlighted || isStageHighlighted;
+                const logStageColors = log.stage ? stageColors[log.stage] : null;
+                
                 return (
                   <div 
                     key={idx} 
                     ref={el => logRefs.current[idx] = el}
                     className={`flex gap-3 mb-0.5 px-2 py-1 rounded transition-all ${
-                      isHighlighted 
+                      isFieldHighlighted 
                         ? 'bg-purple-500/30 ring-2 ring-purple-500/50 animate-pulse' 
+                        : isStageHighlighted && logStageColors
+                        ? `${logStageColors.bg} border-l-2 ${logStageColors.border}`
+                        : selectedStage 
+                        ? 'opacity-30 hover:opacity-60'
                         : 'hover:bg-gray-900/50'
                     }`}
                   >
                     <span className="text-gray-600 w-12 text-right shrink-0">[{log.time}s]</span>
+                    {/* Stage indicator badge */}
+                    {log.stage && !selectedStage && (
+                      <span className={`text-[9px] uppercase px-1.5 py-0.5 rounded ${logStageColors?.bg || 'bg-gray-700'} ${logStageColors?.text || 'text-gray-400'} shrink-0`}>
+                        {log.stage.slice(0, 3)}
+                      </span>
+                    )}
                     <span className={`${getLogColor(log.type)} ${isHighlighted ? 'font-semibold' : ''}`}>
-                      {isHighlighted && (
+                      {isFieldHighlighted && (
                         <Target size={12} className="inline mr-1 text-purple-400" />
                       )}
                       {log.type === 'json' ? (

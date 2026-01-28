@@ -5,6 +5,7 @@ import DetailPage from './pages/DetailPage';
 import ApprovalsPage from './pages/ApprovalsPage';
 import PayPage from './pages/PayPage';
 import SettingsPage from './pages/SettingsPage';
+import VendorsPage from './pages/VendorsPage';
 import { InvoiceProvider } from './context/InvoiceContext';
 
 function Layout({ children }) {
@@ -36,7 +37,7 @@ export default function App() {
                 <Route path="/requisitions" element={<PlaceholderPage title="Requisitions" />} />
                 <Route path="/purchase-orders" element={<PlaceholderPage title="Purchase Orders" />} />
                 <Route path="/prepayments" element={<PlaceholderPage title="Prepayments" />} />
-                <Route path="/vendors" element={<PlaceholderPage title="Vendors" />} />
+                <Route path="/vendors" element={<VendorsPage />} />
                 <Route path="/approvals" element={<ApprovalsPage />} />
                 <Route path="/pay" element={<PayPage />} />
                 <Route path="/audit" element={<PlaceholderPage title="Audit" />} />

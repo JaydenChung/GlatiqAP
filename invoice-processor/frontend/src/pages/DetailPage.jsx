@@ -26,7 +26,7 @@ import {
 } from 'lucide-react';
 import PDFViewer from '../components/PDFViewer';
 import ProcessingHistoryView from '../components/ProcessingHistoryView';
-import ApprovalProcessingModal from '../components/ApprovalProcessingModal';
+import ProcessingView from '../components/ProcessingView';
 import { useInvoices } from '../context/InvoiceContext';
 
 const tabs = [
@@ -76,15 +76,24 @@ export default function DetailPage() {
     setShowApprovalModal(true);
   };
 
-  // Handle completion of Approval Agent analysis
-  const handleApprovalComplete = (result) => {
-    handleApprovalTriageResult(invoice.id, result);
+  // Handle completion of Approval Agent analysis (from ProcessingView in approval mode)
+  const handleApprovalComplete = (result, extractedData, validationResult, approvalResult, processingHistory) => {
+    // The result from ProcessingView contains the route info
+    const triageResult = {
+      route: result.route,
+      invoiceStatus: result.invoiceStatus,
+      processingTime: result.processingTime,
+      tokenUsage: result.tokenUsage,
+    };
+    
+    // Pass the processing history so it can be merged with existing history
+    handleApprovalTriageResult(invoice.id, triageResult, processingHistory);
     setShowApprovalModal(false);
     
     // Navigate based on the triage result
-    if (result.route === 'auto_approve') {
+    if (result.route === 'auto_approve' || result.status === 'auto_approved') {
       navigate('/pay');
-    } else if (result.route === 'route_to_human') {
+    } else if (result.route === 'route_to_human' || result.status === 'pending_approval') {
       navigate('/approvals');
     } else {
       navigate('/'); // Stay on inbox for rejected
@@ -274,7 +283,8 @@ export default function DetailPage() {
                       icon={MapPin} 
                       label="Address" 
                       value={invoice.billFrom?.address}
-                      aiExtracted={invoice.billFrom?._aiExtracted?.address}
+                      aiExtracted={invoice.billFrom?._aiExtracted?.address && !invoice.billFrom?._validationEnriched?.address}
+                      validationCorrected={!!invoice.billFrom?._validationEnriched?.address}
                       onClick={handleFieldClick}
                     />
                     <div className="grid grid-cols-2 gap-2">
@@ -283,7 +293,8 @@ export default function DetailPage() {
                         label="Email" 
                         value={invoice.billFrom?.email} 
                         small
-                        aiExtracted={invoice.billFrom?._aiExtracted?.email}
+                        aiExtracted={invoice.billFrom?._aiExtracted?.email && !invoice.billFrom?._validationEnriched?.email}
+                        validationCorrected={!!invoice.billFrom?._validationEnriched?.email}
                         onClick={handleFieldClick}
                       />
                       <Field 
@@ -291,7 +302,8 @@ export default function DetailPage() {
                         label="Phone" 
                         value={invoice.billFrom?.phone} 
                         small
-                        aiExtracted={invoice.billFrom?._aiExtracted?.phone}
+                        aiExtracted={invoice.billFrom?._aiExtracted?.phone && !invoice.billFrom?._validationEnriched?.phone}
+                        validationCorrected={!!invoice.billFrom?._validationEnriched?.phone}
                         onClick={handleFieldClick}
                       />
                     </div>
@@ -440,14 +452,16 @@ export default function DetailPage() {
                       icon={Mail} 
                       label="Email" 
                       value={invoice.billFrom?.email}
-                      aiExtracted={invoice.billFrom?._aiExtracted?.email}
+                      aiExtracted={invoice.billFrom?._aiExtracted?.email && !invoice.billFrom?._validationEnriched?.email}
+                      validationCorrected={!!invoice.billFrom?._validationEnriched?.email}
                       onClick={handleFieldClick}
                     />
                     <Field 
                       icon={Phone} 
                       label="Phone" 
                       value={invoice.billFrom?.phone}
-                      aiExtracted={invoice.billFrom?._aiExtracted?.phone}
+                      aiExtracted={invoice.billFrom?._aiExtracted?.phone && !invoice.billFrom?._validationEnriched?.phone}
+                      validationCorrected={!!invoice.billFrom?._validationEnriched?.phone}
                       onClick={handleFieldClick}
                     />
                   </div>
@@ -468,7 +482,8 @@ export default function DetailPage() {
                   label="Address" 
                   value={invoice.billFrom?.address} 
                   hideLabel
-                  aiExtracted={invoice.billFrom?._aiExtracted?.address}
+                  aiExtracted={invoice.billFrom?._aiExtracted?.address && !invoice.billFrom?._validationEnriched?.address}
+                  validationCorrected={!!invoice.billFrom?._validationEnriched?.address}
                   onClick={handleFieldClick}
                 />
               </div>
@@ -694,12 +709,32 @@ export default function DetailPage() {
         />
       )}
 
-      {/* Approval Processing Modal (Stage 2: Smart Triage) */}
+      {/* Processing View in Approval Mode (Stage 2: Smart Triage) */}
       {showApprovalModal && (
-        <ApprovalProcessingModal
+        <ProcessingView
           invoice={invoice}
           onComplete={handleApprovalComplete}
-          onClose={() => setShowApprovalModal(false)}
+          approvalMode={true}
+          existingData={{
+            extractedData: {
+              invoiceNumber: invoice.invoiceNumber,
+              invoiceDate: invoice.invoiceDate,
+              dueDate: invoice.dueDate,
+              vendor: invoice.vendor,
+              amount: invoice.amount,
+              subtotal: invoice.subtotal,
+              tax: invoice.tax,
+              currency: invoice.currency,
+              paymentTerms: invoice.paymentTerms,
+              poNumber: invoice.poMatch,
+              billFrom: invoice.billFrom,
+              billTo: invoice.billTo,
+              items: invoice.lineItems,
+              confidence: invoice.confidence,
+              flags: invoice.flags,
+            },
+            validationResult: invoice.aiValidation,
+          }}
         />
       )}
     </div>

@@ -4,7 +4,6 @@ import { Upload, AlertCircle, CheckCircle, Sparkles } from 'lucide-react';
 import InvoiceTable from '../components/InvoiceTable';
 import UploadModal from '../components/UploadModal';
 import ProcessingView from '../components/ProcessingView';
-import ApprovalProcessingModal from '../components/ApprovalProcessingModal';
 import { useInvoices } from '../context/InvoiceContext';
 
 const formatCurrency = (amount) => {
@@ -77,15 +76,24 @@ export default function InboxPage() {
     setRoutingInvoice(invoice);
   };
 
-  // Handle completion of Approval Agent analysis
-  const handleApprovalComplete = (result) => {
+  // Handle completion of Approval Agent analysis (from ProcessingView in approval mode)
+  const handleApprovalComplete = (result, extractedData, validationResult, approvalResult, processingHistory) => {
     if (routingInvoice) {
-      handleApprovalTriageResult(routingInvoice.id, result);
+      // The result from ProcessingView contains the route info
+      const triageResult = {
+        route: result.route,
+        invoiceStatus: result.invoiceStatus,
+        processingTime: result.processingTime,
+        tokenUsage: result.tokenUsage,
+      };
+      
+      // Pass the processing history so it can be merged with existing history
+      handleApprovalTriageResult(routingInvoice.id, triageResult, processingHistory);
       
       // Navigate based on the triage result
-      if (result.route === 'auto_approve') {
+      if (result.route === 'auto_approve' || result.status === 'auto_approved') {
         navigate('/pay');
-      } else if (result.route === 'route_to_human') {
+      } else if (result.route === 'route_to_human' || result.status === 'pending_approval') {
         navigate('/approvals');
       }
       // For auto_reject, stay on inbox page (invoice will show as rejected)
@@ -271,12 +279,32 @@ export default function InboxPage() {
         />
       )}
 
-      {/* Approval Processing Modal (Stage 2: Smart Triage) */}
+      {/* Processing View in Approval Mode (Stage 2: Smart Triage) */}
       {routingInvoice && (
-        <ApprovalProcessingModal
+        <ProcessingView
           invoice={routingInvoice}
           onComplete={handleApprovalComplete}
-          onClose={() => setRoutingInvoice(null)}
+          approvalMode={true}
+          existingData={{
+            extractedData: {
+              invoiceNumber: routingInvoice.invoiceNumber,
+              invoiceDate: routingInvoice.invoiceDate,
+              dueDate: routingInvoice.dueDate,
+              vendor: routingInvoice.vendor,
+              amount: routingInvoice.amount,
+              subtotal: routingInvoice.subtotal,
+              tax: routingInvoice.tax,
+              currency: routingInvoice.currency,
+              paymentTerms: routingInvoice.paymentTerms,
+              poNumber: routingInvoice.poMatch,
+              billFrom: routingInvoice.billFrom,
+              billTo: routingInvoice.billTo,
+              items: routingInvoice.lineItems,
+              confidence: routingInvoice.confidence,
+              flags: routingInvoice.flags,
+            },
+            validationResult: routingInvoice.aiValidation,
+          }}
         />
       )}
     </div>
@@ -288,15 +316,42 @@ export default function InboxPage() {
 function createInvoiceFromResult(testInvoice, result, extractedData, validationResult, approvalResult, processingHistory) {
   const now = new Date();
   
-  // Get corrections from validation result
+  // Get corrections from validation result (includes enrichments from vendor master)
   const corrections = result?.corrections || validationResult?.corrections || {};
+  
+  // IMPORTANT: result.invoiceData contains the FULLY ENRICHED data from the backend
+  // This includes bill_from with phone/email populated from vendor master
+  const backendInvoiceData = result?.invoiceData || {};
   
   // Apply corrections to extracted data (validation agent fixes like payment_terms)
   const correctedData = { ...extractedData };
   if (corrections.payment_terms?.corrected) {
     correctedData.paymentTerms = corrections.payment_terms.corrected;
   }
-  // Add more correction applications here as we add more smart corrections
+  
+  // Use the enriched bill_from from backend if available (has phone/email from vendor master)
+  if (backendInvoiceData.bill_from) {
+    correctedData.billFrom = {
+      name: backendInvoiceData.bill_from.name || extractedData?.billFrom?.name,
+      address: backendInvoiceData.bill_from.address || extractedData?.billFrom?.address,
+      phone: backendInvoiceData.bill_from.phone || extractedData?.billFrom?.phone,
+      email: backendInvoiceData.bill_from.email || extractedData?.billFrom?.email,
+    };
+  }
+  
+  // Also apply vendor enrichments from corrections (in case bill_from wasn't in backend data)
+  if (!correctedData.billFrom) {
+    correctedData.billFrom = {};
+  }
+  if (corrections.phone?.corrected && !correctedData.billFrom.phone) {
+    correctedData.billFrom = { ...correctedData.billFrom, phone: corrections.phone.corrected };
+  }
+  if (corrections.email?.corrected && !correctedData.billFrom.email) {
+    correctedData.billFrom = { ...correctedData.billFrom, email: corrections.email.corrected };
+  }
+  if (corrections.address?.corrected && !correctedData.billFrom.address) {
+    correctedData.billFrom = { ...correctedData.billFrom, address: corrections.address.corrected };
+  }
   
   // Use the invoice number from AI extraction, fall back to generated ID
   const aiInvoiceNumber = correctedData?.invoiceNumber && correctedData.invoiceNumber !== 'UNKNOWN' 
@@ -333,24 +388,37 @@ function createInvoiceFromResult(testInvoice, result, extractedData, validationR
   }
 
   // Build bill_from from ACTUAL AI extraction (or fallback to minimal data)
-  const billFrom = extractedData?.billFrom ? {
-    name: extractedData.billFrom.name || extractedData.vendor || testInvoice.name,
-    address: extractedData.billFrom.address || null,
-    email: extractedData.billFrom.email || null,
-    phone: extractedData.billFrom.phone || null,
+  // Also check correctedData which may have vendor enrichments
+  const billFromSource = correctedData?.billFrom || extractedData?.billFrom;
+  const billFrom = billFromSource ? {
+    name: billFromSource.name || extractedData?.vendor || testInvoice.name,
+    address: billFromSource.address || null,
+    email: billFromSource.email || null,
+    phone: billFromSource.phone || null,
     // Track which fields were AI-extracted
     _aiExtracted: {
-      name: !!extractedData.billFrom.name,
-      address: !!extractedData.billFrom.address,
-      email: !!extractedData.billFrom.email,
-      phone: !!extractedData.billFrom.phone,
+      name: !!extractedData?.billFrom?.name,
+      address: !!extractedData?.billFrom?.address,
+      email: !!extractedData?.billFrom?.email,
+      phone: !!extractedData?.billFrom?.phone,
+    },
+    // Track which fields were enriched from vendor master
+    _validationEnriched: {
+      phone: !!corrections.phone?.corrected,
+      email: !!corrections.email?.corrected,
+      address: !!corrections.address?.corrected,
     }
   } : {
     name: extractedData?.vendor || testInvoice.name,
-    address: null,
-    email: null,
-    phone: null,
-    _aiExtracted: { name: !!extractedData?.vendor, address: false, email: false, phone: false }
+    address: corrections.address?.corrected || null,
+    email: corrections.email?.corrected || null,
+    phone: corrections.phone?.corrected || null,
+    _aiExtracted: { name: !!extractedData?.vendor, address: false, email: false, phone: false },
+    _validationEnriched: {
+      phone: !!corrections.phone?.corrected,
+      email: !!corrections.email?.corrected,
+      address: !!corrections.address?.corrected,
+    }
   };
 
   // Build bill_to from ACTUAL AI extraction (or null if not extracted)

@@ -27,25 +27,60 @@ const stages = [
 ];
 
 const WEBSOCKET_URL = 'ws://localhost:8000/ws/process';
+const APPROVAL_WEBSOCKET_URL = 'ws://localhost:8000/ws/approval';
 
-export default function ProcessingView({ invoice, onComplete }) {
-  const [currentStage, setCurrentStage] = useState(0);
-  const [stageStatus, setStageStatus] = useState(['pending', 'pending', 'pending', 'pending']);
+/**
+ * ProcessingView handles both Stage 1 (Ingestion + Validation) and Stage 2 (Approval) workflows.
+ * 
+ * @param {Object} invoice - The invoice being processed
+ * @param {Function} onComplete - Callback when processing completes
+ * @param {boolean} approvalMode - If true, runs Stage 2 (Approval) workflow only
+ * @param {Object} existingData - Pre-populated data from Stage 1 (for approval mode)
+ */
+export default function ProcessingView({ invoice, onComplete, approvalMode = false, existingData = null }) {
+  // In approval mode, start with ingestion+validation complete, approval running
+  const [currentStage, setCurrentStage] = useState(approvalMode ? 2 : 0);
+  const [stageStatus, setStageStatus] = useState(
+    approvalMode 
+      ? ['complete', 'complete', 'pending', 'pending']  // Approval mode: first two stages done
+      : ['pending', 'pending', 'pending', 'pending']
+  );
   const [logs, setLogs] = useState([]);
-  const [extractedData, setExtractedData] = useState(null);
-  const [validationResult, setValidationResult] = useState(null);
+  // Pre-populate data in approval mode from existingData
+  const [extractedData, setExtractedData] = useState(approvalMode && existingData?.extractedData ? {
+    invoiceNumber: existingData.extractedData.invoiceNumber || invoice.invoiceNumber,
+    invoiceDate: existingData.extractedData.invoiceDate || invoice.invoiceDate,
+    dueDate: existingData.extractedData.dueDate || invoice.dueDate,
+    vendor: existingData.extractedData.vendor || invoice.vendor,
+    amount: existingData.extractedData.amount || invoice.amount,
+    subtotal: existingData.extractedData.subtotal || invoice.subtotal,
+    tax: existingData.extractedData.tax || invoice.tax,
+    currency: existingData.extractedData.currency || invoice.currency || 'USD',
+    paymentTerms: existingData.extractedData.paymentTerms || invoice.paymentTerms,
+    poNumber: existingData.extractedData.poNumber || invoice.poMatch,
+    billFrom: existingData.extractedData.billFrom || invoice.billFrom,
+    billTo: existingData.extractedData.billTo || invoice.billTo,
+    items: existingData.extractedData.items || invoice.lineItems || [],
+    confidence: existingData.extractedData.confidence || invoice.confidence || 50,
+    flags: existingData.extractedData.flags || invoice.flags || [],
+  } : null);
+  const [validationResult, setValidationResult] = useState(approvalMode && existingData?.validationResult ? existingData.validationResult : null);
   const [approvalResult, setApprovalResult] = useState(null);
   const [result, setResult] = useState(null);
   const [startTime] = useState(Date.now());
   const [activePanel, setActivePanel] = useState('log'); // 'log' | 'json' | 'state'
   const [currentJsonOutput, setCurrentJsonOutput] = useState(null);
   const [workflowState, setWorkflowState] = useState({
-    raw_invoice: invoice.rawText,
-    invoice_data: null,
-    validation_result: null,
+    raw_invoice: invoice.rawText || invoice.sourceFile || 'N/A',
+    invoice_data: approvalMode ? {
+      vendor: invoice.vendor,
+      amount: invoice.amount,
+      invoice_number: invoice.invoiceNumber,
+    } : null,
+    validation_result: approvalMode ? { is_valid: invoice.status === 'ready_for_approval' } : null,
     approval_decision: null,
     payment_result: null,
-    current_agent: 'ingestion',
+    current_agent: approvalMode ? 'approval' : 'ingestion',
     status: 'processing',
   });
   const [wsStatus, setWsStatus] = useState('connecting'); // 'connecting' | 'connected' | 'error' | 'closed'
@@ -68,20 +103,32 @@ export default function ProcessingView({ invoice, onComplete }) {
     // Track if this effect instance is still active (for cleanup)
     let isActive = true;
     
-    // Create WebSocket connection
-    const ws = new WebSocket(WEBSOCKET_URL);
+    // Create WebSocket connection - different endpoint for approval mode
+    let wsUrl;
+    if (approvalMode) {
+      // For approval mode, connect to the approval WebSocket endpoint
+      const backendId = invoice.backendInvoiceId || invoice.id;
+      wsUrl = `${APPROVAL_WEBSOCKET_URL}/${backendId}`;
+    } else {
+      wsUrl = WEBSOCKET_URL;
+    }
+    
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
     
     ws.onopen = () => {
       if (!isActive) return; // Ignore if unmounted
-      console.log('WebSocket connected');
+      console.log('WebSocket connected to:', wsUrl);
       setWsStatus('connected');
       
-      // Send invoice data to process
-      ws.send(JSON.stringify({
-        raw_invoice: invoice.rawText,
-        invoice_id: invoice.id,
-      }));
+      // In approval mode, the connection itself triggers the workflow
+      // In normal mode, send invoice data to process
+      if (!approvalMode) {
+        ws.send(JSON.stringify({
+          raw_invoice: invoice.rawText,
+          invoice_id: invoice.id,
+        }));
+      }
     };
     
     ws.onmessage = (event) => {
@@ -115,7 +162,7 @@ export default function ProcessingView({ invoice, onComplete }) {
         ws.close();
       }
     };
-  }, [invoice]);
+  }, [invoice, approvalMode]);
 
   // Handle incoming WebSocket events
   const handleEvent = (event) => {
@@ -123,7 +170,15 @@ export default function ProcessingView({ invoice, onComplete }) {
     
     switch (eventType) {
       case 'connected':
-        addLog('system', '🔌 Connected to processing server');
+        if (approvalMode) {
+          addLog('system', '🔗 Connected to Approval Agent', 'approval');
+          addLog('system', `🤔 Running approval analysis for ${invoice.backendInvoiceId || invoice.id}`, 'approval');
+          // Mark approval stage as running
+          setCurrentStageWithRef(2);
+          updateStageStatus(2, 'running');
+        } else {
+          addLog('system', '🔌 Connected to processing server', 'ingestion');
+        }
         break;
         
       case 'stage_start':
@@ -135,10 +190,10 @@ export default function ProcessingView({ invoice, onComplete }) {
         break;
         
       case 'grok_call':
-        addLog('grok', `🤖 Grok API Call:`);
-        addLog('grok', `   Model: ${event.model}`);
-        addLog('grok', `   Mode: ${event.mode} (structured output)`);
-        addLog('grok', `   Temperature: ${event.temperature}`);
+        addLog('grok', `🤖 Grok API Call:`, event.stage);
+        addLog('grok', `   Model: ${event.model}`, event.stage);
+        addLog('grok', `   Mode: ${event.mode} (structured output)`, event.stage);
+        addLog('grok', `   Temperature: ${event.temperature}`, event.stage);
         break;
         
       case 'grok_response':
@@ -203,8 +258,8 @@ export default function ProcessingView({ invoice, onComplete }) {
         break;
         
       case 'self_correction':
-        addLog('warning', `⚠️  ${event.reason}`);
-        addLog('warning', `🔄 SELF-CORRECTION: Retry attempt ${event.attempt}`);
+        addLog('warning', `⚠️  ${event.reason}`, event.stage);
+        addLog('warning', `🔄 SELF-CORRECTION: Retry attempt ${event.attempt}`, event.stage);
         break;
         
       case 'token_usage':
@@ -216,7 +271,7 @@ export default function ProcessingView({ invoice, onComplete }) {
           }
         }));
         if (event.usage) {
-          addLog('info', `   📊 Tokens: ${event.usage.prompt_tokens} in / ${event.usage.completion_tokens} out (${event.usage.total_tokens} total)`);
+          addLog('info', `   📊 Tokens: ${event.usage.prompt_tokens} in / ${event.usage.completion_tokens} out (${event.usage.total_tokens} total)`, event.stage);
         }
         break;
         
@@ -225,7 +280,7 @@ export default function ProcessingView({ invoice, onComplete }) {
         break;
         
       case 'log':
-        addLog(event.level, event.message);
+        addLog(event.level, event.message, event.stage);
         break;
         
       // STAGED WORKFLOW: Stage 1 complete (Ingestion + Validation)
@@ -264,7 +319,7 @@ export default function ProcessingView({ invoice, onComplete }) {
   const handleStageStart = (event) => {
     const stageIndex = stages.findIndex(s => s.id === event.stage);
     if (stageIndex !== -1) {
-      setCurrentStage(stageIndex);
+      setCurrentStageWithRef(stageIndex);
       updateStageStatus(stageIndex, 'running');
     }
   };
@@ -318,13 +373,22 @@ export default function ProcessingView({ invoice, onComplete }) {
       }));
     }
     
+    // Mark approval stage as complete
+    updateStageStatus(2, 'complete');
+    
     // Update approval result with route info
+    const newApprovalResult = {
+      route: resultData.route,
+      invoiceStatus: resultData.invoice_status,
+      processingTime: event.processing_time,
+      tokenUsage: event.token_usage,
+    };
     setApprovalResult(prev => ({
       ...prev,
-      route: resultData.route,
+      ...newApprovalResult,
     }));
     
-    setResult({
+    const newResult = {
       status: resultData.route === 'auto_approve' ? 'auto_approved' :
               resultData.route === 'auto_reject' ? 'rejected' : 'pending_approval',
       invoiceId: event.invoice_id,
@@ -332,7 +396,19 @@ export default function ProcessingView({ invoice, onComplete }) {
       route: resultData.route,
       processingTime: event.processing_time,
       tokenUsage: event.token_usage,
-    });
+    };
+    setResult(newResult);
+    
+    // Update workflow state
+    setWorkflowState(prev => ({
+      ...prev,
+      approval_decision: {
+        route: resultData.route,
+        invoice_status: resultData.invoice_status,
+      },
+      current_agent: 'complete',
+      status: 'complete',
+    }));
   };
 
   const handleComplete = (event) => {
@@ -378,9 +454,21 @@ export default function ProcessingView({ invoice, onComplete }) {
     });
   };
 
-  const addLog = (type, message) => {
+  // Track current stage for log tagging
+  const currentStageRef = useRef(approvalMode ? 'approval' : 'ingestion');
+
+  const addLog = (type, message, stage = null) => {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    setLogs(prev => [...prev, { time: elapsed, type, message }]);
+    // Use provided stage, or fall back to current stage
+    const logStage = stage || currentStageRef.current;
+    setLogs(prev => [...prev, { time: elapsed, type, message, stage: logStage }]);
+  };
+
+  // Update current stage ref when stage changes
+  const setCurrentStageWithRef = (stageIndex) => {
+    setCurrentStage(stageIndex);
+    const stageIds = ['ingestion', 'validation', 'approval', 'payment'];
+    currentStageRef.current = stageIds[stageIndex] || 'ingestion';
   };
 
   const updateStageStatus = (index, status) => {
@@ -477,14 +565,17 @@ export default function ProcessingView({ invoice, onComplete }) {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <div className="relative">
-              <span className="text-3xl">{invoice.icon || '📄'}</span>
+              <span className="text-3xl">{approvalMode ? '🤔' : (invoice.icon || '📄')}</span>
               {!result && (
                 <div className="absolute -bottom-1 -right-1 w-3 h-3 bg-blue-500 rounded-full animate-pulse" />
               )}
             </div>
             <div>
               <h1 className="text-white font-semibold text-lg">
-                {result ? 'Processing Complete' : 'Processing Invoice'}
+                {result 
+                  ? (approvalMode ? 'Approval Analysis Complete' : 'Processing Complete')
+                  : (approvalMode ? 'Approval Agent Analysis' : 'Processing Invoice')
+                }
               </h1>
               <p className="text-gray-400 text-sm">
                 {invoice.name || invoice.vendor} • ${(invoice.amount || 0).toLocaleString()}
@@ -908,14 +999,14 @@ export default function ProcessingView({ invoice, onComplete }) {
                     {result.status === 'approved' 
                       ? (result.requiresReview ? 'Approved — Flagged for Review' : 'Invoice Approved & Paid')
                       : result.status === 'auto_approved'
-                      ? 'Auto-Approved — Ready for Payment'
+                      ? (approvalMode ? 'Auto-Approved — Ready for Payment' : 'Auto-Approved — Ready for Payment')
                       : result.status === 'inbox'
                       ? 'Stage 1 Complete — Invoice in Inbox'
                       : result.status === 'pending_approval'
-                      ? 'Routed to Approval Queue'
+                      ? (approvalMode ? 'Needs Human Review — Routed to Approval Chain' : 'Routed to Approval Queue')
                       : result.status === 'error'
                       ? 'Processing Error'
-                      : 'Invoice Rejected'
+                      : (approvalMode ? 'Auto-Rejected — Major Red Flags Detected' : 'Invoice Rejected')
                     }
                   </h3>
                   <span className="text-gray-500 text-xs">
@@ -930,9 +1021,11 @@ export default function ProcessingView({ invoice, onComplete }) {
                     : result.status === 'inbox'
                     ? result.message || 'Ready for routing to approval'
                     : result.status === 'pending_approval'
-                    ? 'Waiting for VP/Manager approval'
+                    ? (approvalMode ? 'Routed to VP/Manager approval chain' : 'Waiting for VP/Manager approval')
                     : result.status === 'auto_approved'
-                    ? 'Under $10K with no flags — auto-approved'
+                    ? (approvalMode ? 'Under $10K with no flags — auto-approved by AI' : 'Under $10K with no flags — auto-approved')
+                    : result.status === 'rejected'
+                    ? (approvalMode ? 'Major red flags detected — auto-rejected by AI' : result.reason)
                     : result.reason
                   }
                 </p>
@@ -947,6 +1040,7 @@ export default function ProcessingView({ invoice, onComplete }) {
                 workflowState,
                 processingTime: getElapsedTime(),
                 invoiceId: result.invoiceId,
+                approvalMode,
               })}
               className={`font-medium px-4 py-1.5 text-sm rounded-lg transition-all ${
                 result.status === 'approved' || result.status === 'auto_approved'
@@ -956,7 +1050,14 @@ export default function ProcessingView({ invoice, onComplete }) {
                   : 'bg-white hover:bg-gray-100 text-gray-900'
               }`}
             >
-              {result.status === 'inbox' ? 'View in Inbox' : 'Continue'}
+              {result.status === 'inbox' 
+                ? 'View in Inbox' 
+                : result.status === 'auto_approved'
+                ? 'Go to Payments'
+                : result.status === 'pending_approval'
+                ? 'Go to Approvals'
+                : 'Continue'
+              }
             </button>
           </div>
         </div>
