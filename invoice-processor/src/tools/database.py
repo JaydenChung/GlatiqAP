@@ -11,8 +11,8 @@ Provides:
 - Purchase order tracking (future)
 
 Test Data (from MISSION.md):
-- WidgetA: 15 in stock
-- WidgetB: 10 in stock
+- WidgetA: 10 in stock (Invoice 1 needs 10 - exact match)
+- WidgetB: 5 in stock (Invoice 1 needs 5 - exact match)
 - GadgetX: 5 in stock
 - FakeItem: 0 in stock (fraud test)
 
@@ -143,8 +143,8 @@ def init_database(force_reset: bool = False) -> None:
         
         # Insert test inventory data (UPSERT pattern for idempotency)
         test_inventory = [
-            ("WidgetA", 15, 100.0),   # Invoice 1 needs 10
-            ("WidgetB", 10, 150.0),   # Invoice 1 needs 5
+            ("WidgetA", 10, 100.0),   # Invoice 1 needs 10 - exact match (variance 0)
+            ("WidgetB", 5, 150.0),    # Invoice 1 needs 5 - exact match (variance 0)
             ("GadgetX", 5, 500.0),    # Invoice 2 needs 20 (will fail!)
             ("FakeItem", 0, 999.0),   # Invoice 3 (fraud) - 0 stock
         ]
@@ -322,7 +322,7 @@ def check_stock(item_name: str) -> Optional[dict]:
         
     Example:
         >>> check_stock("WidgetA")
-        {"item": "WidgetA", "stock": 15, "unit_price": 100.0}
+        {"item": "WidgetA", "stock": 10, "unit_price": 100.0}
     """
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -355,7 +355,7 @@ def check_multiple_items(item_names: list[str]) -> dict[str, dict]:
     Example:
         >>> check_multiple_items(["WidgetA", "FakeItem", "Unknown"])
         {
-            "WidgetA": {"item": "WidgetA", "stock": 15, ...},
+            "WidgetA": {"item": "WidgetA", "stock": 10, ...},
             "FakeItem": {"item": "FakeItem", "stock": 0, ...},
             "Unknown": None
         }
@@ -385,7 +385,7 @@ def validate_inventory(items: list[dict]) -> dict:
         
     Example:
         >>> validate_inventory([{"name": "WidgetA", "quantity": 10}])
-        {"WidgetA": {"requested": 10, "in_stock": 15, "available": True}}
+        {"WidgetA": {"requested": 10, "in_stock": 10, "available": True}}
     """
     results = {}
     

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Upload, AlertCircle, CheckCircle, Sparkles } from 'lucide-react';
+import { Upload, AlertCircle, CheckCircle, Sparkles, XCircle } from 'lucide-react';
 import InvoiceTable from '../components/InvoiceTable';
 import UploadModal from '../components/UploadModal';
 import ProcessingView from '../components/ProcessingView';
@@ -51,6 +51,9 @@ export default function InboxPage() {
   
   const readyInvoices = allInvoices.filter(inv => inv.status === 'ready_for_approval');
   const readyTotal = readyInvoices.reduce((sum, inv) => sum + inv.amount, 0);
+
+  const rejectedInvoices = allInvoices.filter(inv => inv.status === 'rejected');
+  const rejectedTotal = rejectedInvoices.reduce((sum, inv) => sum + inv.amount, 0);
 
   const handleSelectTestInvoice = (testInvoice) => {
     setShowUploadModal(false);
@@ -114,6 +117,7 @@ export default function InboxPage() {
   // Determine which section to show based on active tab
   const showNeedsReviewSection = activeTab === 'all' || activeTab === 'needs_review';
   const showReadySection = activeTab === 'all' || activeTab === 'ready_for_approval';
+  const showRejectedSection = activeTab === 'all' || activeTab === 'rejected';
 
   return (
     <div className="min-h-screen">
@@ -198,6 +202,25 @@ export default function InboxPage() {
             {stats.readyForApproval}
           </span>
         </button>
+        {/* Rejected Tab - only show if there are rejected invoices */}
+        {stats.rejected > 0 && (
+          <button
+            onClick={() => setActiveTab('rejected')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-colors ${
+              activeTab === 'rejected'
+                ? 'bg-red-50 text-red-600 ring-1 ring-red-200'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            <XCircle size={15} />
+            Rejected
+            <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${
+              activeTab === 'rejected' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-600'
+            }`}>
+              {stats.rejected}
+            </span>
+          </button>
+        )}
       </div>
 
       {/* Empty State */}
@@ -260,6 +283,35 @@ export default function InboxPage() {
             invoices={readyInvoices} 
             onRoute={handleRoute}
             variant="ready"
+          />
+        </div>
+      )}
+
+      {/* Rejected Section - Shows auto-rejected invoices */}
+      {rejectedInvoices.length > 0 && showRejectedSection && (
+        <div className="mb-8">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-2 h-2 bg-red-400 rounded-full" />
+            <h2 className="text-sm font-semibold text-gray-900">Auto-Rejected by AI</h2>
+            <span className="text-sm text-gray-500">
+              {rejectedInvoices.length} invoices • {formatCurrency(rejectedTotal)}
+            </span>
+          </div>
+          <div className="bg-red-50 border border-red-100 rounded-lg p-4 mb-4">
+            <div className="flex items-start gap-3">
+              <XCircle size={18} className="text-red-500 mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="text-sm font-medium text-red-800">Critical Issues Detected</p>
+                <p className="text-sm text-red-600 mt-1">
+                  These invoices were automatically rejected due to critical red flags (e.g., suspended vendor, massive inventory variance). 
+                  Review the details below and re-upload corrected invoices if needed.
+                </p>
+              </div>
+            </div>
+          </div>
+          <InvoiceTable 
+            invoices={rejectedInvoices} 
+            variant="rejected"
           />
         </div>
       )}
@@ -500,7 +552,9 @@ function createInvoiceFromResult(testInvoice, result, extractedData, validationR
     // AI Processing metadata
     aiProcessed: true,
     aiResult: result,
-    aiValidation: validationResult,
+    // Use the full validation result from result object (includes line_items_validated)
+    // Fall back to the passed validationResult if result.validationResult is not available
+    aiValidation: result?.validationResult || validationResult,
     aiApproval: approvalResult,
     processingHistory: processingHistory || null,
     processedAt: now.toISOString(),
@@ -536,5 +590,13 @@ function createInvoiceFromResult(testInvoice, result, extractedData, validationR
     // Validation corrections (fields changed by validation agent)
     // These will be highlighted in amber/orange in the UI
     _validationCorrected: result?.corrections || validationResult?.corrections || {},
+    
+    // Audit trail (Session 2026-01-28_EXPLAIN)
+    auditTrail: result?.auditTrail || processingHistory?.auditTrail || [],
+    
+    // Vendor profile from vendor master (Session 2026-01-28_VENDOR)
+    // Used to populate Vendor Compliance section from authoritative source
+    // This is separate from AI-extracted billFrom data
+    vendorProfile: result?.vendor_profile || result?.validationResult?.vendor_profile || null,
   };
 }

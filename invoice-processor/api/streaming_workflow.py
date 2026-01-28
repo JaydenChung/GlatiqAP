@@ -27,13 +27,34 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import src  # noqa: F401 - triggers path setup
 
-from src.schemas.models import WorkflowState, InvoiceStatus
+from src.schemas.models import WorkflowState, InvoiceStatus, AuditEvent
 from src.agents.ingestion import ingestion_agent
 from src.agents.validation import validation_agent
 from src.agents.approval import approval_agent
 from src.agents.payment import payment_agent
 from src.tools.database import init_database
 from src.client import get_last_usage, get_total_usage, reset_usage_tracking
+from datetime import datetime
+
+
+def create_audit_event(
+    event_type: str,
+    actor: str,
+    title: str,
+    description: str,
+    details: dict = None,
+    ai_summary: str = None
+) -> AuditEvent:
+    """Create a structured audit event."""
+    return {
+        "event_type": event_type,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "actor": actor,
+        "title": title,
+        "description": description,
+        "details": details,
+        "ai_summary": ai_summary,
+    }
 
 
 # =============================================================================
@@ -118,6 +139,18 @@ async def process_invoice_streaming(raw_invoice: str, invoice_id: str = None) ->
     # Ensure database is ready
     init_database()
     
+    # Initialize audit trail with "invoice received" event
+    initial_audit_event = create_audit_event(
+        event_type="invoice_received",
+        actor="system",
+        title="Invoice Received",
+        description=f"Invoice uploaded for processing.",
+        details={
+            "input_length": len(raw_invoice),
+            "invoice_id": invoice_id,
+        },
+    )
+    
     # Initialize workflow state with new staged fields
     state: WorkflowState = {
         "raw_invoice": raw_invoice,
@@ -135,6 +168,7 @@ async def process_invoice_streaming(raw_invoice: str, invoice_id: str = None) ->
         "rejected_by": None,
         "rejected_at": None,
         "rejection_reason": None,
+        "audit_trail": [initial_audit_event],
     }
     
     # Yield initial state
@@ -220,6 +254,23 @@ async def process_invoice_streaming(raw_invoice: str, invoice_id: str = None) ->
             if invoice_data.get("flags"):
                 yield log_event("warning", f"⚠️ Flags: {', '.join(invoice_data.get('flags', []))}")
             
+            # Add AI Processing audit event
+            ai_processing_event = create_audit_event(
+                event_type="ai_processing",
+                actor="ai:ingestion",
+                title="AI Processing Complete",
+                description=f"Data extracted with {invoice_data.get('confidence', 50)}% confidence - {len(invoice_data.get('items', []))} line item(s) detected.",
+                details={
+                    "confidence": invoice_data.get("confidence", 50),
+                    "line_item_count": len(invoice_data.get("items", [])),
+                    "extraction_method": "Grok AI",
+                    "vendor": invoice_data.get("vendor"),
+                    "amount": invoice_data.get("amount"),
+                    "flags": invoice_data.get("flags", []),
+                },
+            )
+            state["audit_trail"] = state.get("audit_trail", []) + [ai_processing_event]
+            
             yield make_event("stage_complete", stage="ingestion", status="complete", 
                            data=extraction_data, next_stage="validation")
         else:
@@ -273,6 +324,7 @@ async def process_invoice_streaming(raw_invoice: str, invoice_id: str = None) ->
         corrections = val_data.get("corrections", {})
         enrichments = val_data.get("enrichments", {})
         matched_vendor = val_data.get("matched_vendor")
+        vendor_profile = val_data.get("vendor_profile")  # Full vendor master record
         
         # Log vendor matching
         if matched_vendor:
@@ -336,6 +388,22 @@ async def process_invoice_streaming(raw_invoice: str, invoice_id: str = None) ->
         state["invoice_status"] = InvoiceStatus.INBOX.value
         state["current_agent"] = "awaiting_routing"
         
+        # Add validation complete audit event
+        validation_event = create_audit_event(
+            event_type="validation_complete",
+            actor="ai:validation",
+            title="Validation Complete" if is_valid else "Validation Issues Detected",
+            description=f"Invoice validation {'passed' if is_valid else 'found issues'} - {len(val_data.get('errors', []))} error(s), {len(val_data.get('warnings', []))} warning(s).",
+            details={
+                "is_valid": is_valid,
+                "errors": val_data.get("errors", []),
+                "warnings": val_data.get("warnings", []),
+                "corrections_made": len(corrections),
+                "vendor_matched": matched_vendor,
+            },
+        )
+        state["audit_trail"] = state.get("audit_trail", []) + [validation_event]
+        
         if is_valid:
             yield log_event("success", "")
             yield log_event("success", "   ✅ VALIDATION PASSED")
@@ -394,6 +462,10 @@ async def process_invoice_streaming(raw_invoice: str, invoice_id: str = None) ->
     source_path = existing_entry.get("source_path") or (raw_input if is_pdf else None)
     original_filename = existing_entry.get("original_filename")
     
+    # Get vendor profile from validation result for store
+    val_result_for_store = state.get("validation_result", {})
+    vendor_profile_for_store = val_result_for_store.get("vendor_profile")
+    
     invoice_store[invoice_id] = {
         "id": invoice_id,
         "status": InvoiceStatus.INBOX.value,
@@ -408,6 +480,10 @@ async def process_invoice_streaming(raw_invoice: str, invoice_id: str = None) ->
         "source_type": "pdf" if is_pdf else "text",
         "source_path": source_path,
         "original_filename": original_filename,
+        # Audit trail (Session 2026-01-28_EXPLAIN)
+        "audit_trail": state.get("audit_trail", []),
+        # Vendor profile from vendor master (Session 2026-01-28_VENDOR)
+        "vendor_profile": vendor_profile_for_store,
     }
     
     # Final event - Stage 1 complete, ready for routing
@@ -417,6 +493,10 @@ async def process_invoice_streaming(raw_invoice: str, invoice_id: str = None) ->
     # Get corrections from validation result
     val_result = state.get("validation_result", {})
     corrections = val_result.get("corrections", {})
+    
+    # Get vendor profile from validation result (Session 2026-01-28_VENDOR)
+    val_result = state.get("validation_result", {})
+    vendor_profile = val_result.get("vendor_profile")
     
     final_result = {
         "status": "inbox",
@@ -433,6 +513,11 @@ async def process_invoice_streaming(raw_invoice: str, invoice_id: str = None) ->
         "source_type": "pdf" if is_pdf else "text",
         "source_path": source_path,
         "original_filename": original_filename,
+        # Audit trail (Session 2026-01-28_EXPLAIN)
+        "audit_trail": state.get("audit_trail", []),
+        # Vendor profile from vendor master (Session 2026-01-28_VENDOR)
+        # Used to populate Vendor Compliance section from authoritative source
+        "vendor_profile": vendor_profile,
     }
     
     yield make_event("stage1_complete", 
@@ -500,7 +585,8 @@ async def process_approval_streaming(invoice_id: str) -> AsyncGenerator[dict, No
             "risk_score": app_data.get("risk_score"),
             "route": route,
             "red_flags": app_data.get("red_flags", []),
-            "reasoning_chain": app_data.get("reasoning_chain", [])
+            "reasoning_chain": app_data.get("reasoning_chain", []),
+            "validation_errors": app_data.get("validation_errors", []),
         }
         
         yield log_event("info", "")
@@ -508,6 +594,13 @@ async def process_approval_streaming(invoice_id: str) -> AsyncGenerator[dict, No
         for step in approval_json.get("reasoning_chain", []):
             await asyncio.sleep(0.1)
             yield log_event("info", f"   → {step}")
+        
+        # Show validation errors if present (for rejected/human-review invoices)
+        if approval_json.get("validation_errors"):
+            yield log_event("error", "")
+            yield log_event("error", "❌ Validation Errors:")
+            for err in approval_json["validation_errors"]:
+                yield log_event("error", f"   • {err}")
         
         if approval_json.get("red_flags"):
             yield log_event("warning", "")
@@ -522,6 +615,8 @@ async def process_approval_streaming(invoice_id: str) -> AsyncGenerator[dict, No
         yield log_event("info", f"📊 Risk Score: {app_data.get('risk_score', 0):.2f}")
         
         # Determine new status based on route
+        validation_failed = not val_data.get("is_valid")
+        
         if route == "auto_approve":
             state["invoice_status"] = InvoiceStatus.AUTO_APPROVED.value
             yield log_event("success", "🟢 AUTO-APPROVED — Skipping human review, ready for payment")
@@ -529,28 +624,115 @@ async def process_approval_streaming(invoice_id: str) -> AsyncGenerator[dict, No
             next_stage = "payment"
         elif route == "auto_reject":
             state["invoice_status"] = InvoiceStatus.AUTO_REJECTED.value
-            yield log_event("error", "🔴 AUTO-REJECTED — Major red flags detected")
+            yield log_event("error", "🔴 AUTO-REJECTED — Critical issues detected")
             status_msg = "failed"
-            next_stage = None
-        else:
+            next_stage = "payment_rejection"  # Will trigger Payment Agent to log rejection
+        elif route == "route_to_human" and validation_failed:
+            # High-value invoice with validation errors → human must decide
             state["invoice_status"] = InvoiceStatus.PENDING_APPROVAL.value
-            yield log_event("warning", "🟡 ROUTED TO HUMAN — Needs VP/manager approval")
+            yield log_event("warning", "🟡 ROUTED TO HUMAN — High-value invoice with validation issues needs review")
+            status_msg = "warning"
+            next_stage = "human_approval"
+        else:
+            # Standard high-value invoice (validation passed)
+            state["invoice_status"] = InvoiceStatus.PENDING_APPROVAL.value
+            yield log_event("warning", "🟡 ROUTED TO HUMAN — High-value invoice needs VP/manager approval")
             status_msg = "warning"
             next_stage = "human_approval"
         
+        # Add approval decision audit event
+        approval_event = create_audit_event(
+            event_type="approval_decision",
+            actor="ai:approval",
+            title="Approval Decision Made",
+            description=f"Invoice {route.replace('_', ' ')} - Risk score: {app_data.get('risk_score', 0):.2f}",
+            details={
+                "route": route,
+                "risk_score": app_data.get("risk_score", 0),
+                "recommendation": app_data.get("recommendation"),
+                "red_flags": app_data.get("red_flags", []),
+                "reasoning": app_data.get("reason"),
+            },
+            ai_summary=app_data.get("reason"),
+        )
+        state["audit_trail"] = state.get("audit_trail", []) + [approval_event]
+        
         yield make_event("stage_complete", stage="approval", status=status_msg, 
                         data=approval_json, next_stage=next_stage)
+        
+        # =====================================================================
+        # AUTO-REJECTION: Chain Payment Agent to log rejection
+        # Session 2026-01-28_EXPLAIN - Payment Agent logs rejections with Grok
+        # =====================================================================
+        if route == "auto_reject":
+            yield log_event("system", "")
+            yield log_event("system", "═" * 50)
+            yield log_event("system", "💰 PAYMENT AGENT (Rejection Logging)")
+            yield log_event("system", "═" * 50)
+            
+            yield make_event("stage_start", stage="payment", description="Logging rejection with Grok analysis")
+            
+            invoice_data = state.get("invoice_data", {})
+            yield log_event("info", f"Vendor: {invoice_data.get('vendor')}")
+            yield log_event("info", f"Amount: ${invoice_data.get('amount', 0):,.2f}")
+            yield log_event("info", "Approval Status: REJECTED")
+            yield log_event("info", "")
+            yield log_event("grok", "🤖 Analyzing rejection with Grok...")
+            
+            yield make_event("grok_call", stage="payment", model="grok-3-mini", mode="json", temperature=0.1)
+            
+            await asyncio.sleep(0.2)
+            
+            # Run Payment Agent to log the rejection
+            payment_result = payment_agent(state)
+            state.update(payment_result)
+            
+            pay_data = state.get("payment_result", {})
+            
+            payment_json = {
+                "success": pay_data.get("success"),
+                "transaction_id": pay_data.get("transaction_id"),
+                "error": pay_data.get("error"),
+                "rejection_logged": True,
+            }
+            
+            yield make_event("grok_response", stage="payment", data=payment_json)
+            
+            # Get the rejection audit event details
+            audit_trail = state.get("audit_trail", [])
+            rejection_event = next((e for e in reversed(audit_trail) if e.get("event_type") == "payment_rejected"), None)
+            
+            if rejection_event:
+                yield log_event("success", f"📝 Rejection Logged: {rejection_event.get('title', 'Payment Rejected')}")
+                yield log_event("info", f"   {rejection_event.get('description', '')}")
+                details = rejection_event.get("details", {})
+                if details.get("primary_reason"):
+                    yield log_event("warning", f"   Primary Reason: {details['primary_reason']}")
+                if details.get("contributing_factors"):
+                    yield log_event("info", f"   Contributing Factors: {', '.join(details['contributing_factors'])}")
+                if details.get("recommendation"):
+                    yield log_event("info", f"   Recommendation: {details['recommendation']}")
+            else:
+                yield log_event("error", f"❌ {pay_data.get('error', 'Invoice not approved')}")
+            
+            yield make_event("stage_complete", stage="payment", status="failed", data=payment_json)
+            
+            yield log_event("system", "")
+            yield log_event("system", "═" * 50)
+            yield log_event("system", "🚫 INVOICE REJECTED — Audit trail recorded")
+            yield log_event("system", "═" * 50)
         
         # Update store
         invoice_store[invoice_id]["workflow_state"] = dict(state)
         invoice_store[invoice_id]["status"] = state["invoice_status"]
         invoice_store[invoice_id]["approval_decision"] = app_data
+        invoice_store[invoice_id]["audit_trail"] = state.get("audit_trail", [])
         
         processing_time = time.time() - start_time
         total_usage = get_total_usage()
         
         yield make_event("stage2_complete",
-                        result={"route": route, "invoice_status": state["invoice_status"]},
+                        result={"route": route, "invoice_status": state["invoice_status"], "audit_trail": state.get("audit_trail", [])},
                         processing_time=processing_time,
                         token_usage=total_usage,
                         invoice_id=invoice_id)
@@ -564,11 +746,20 @@ async def process_approval_streaming(invoice_id: str) -> AsyncGenerator[dict, No
 # STREAMING WORKFLOW - STAGE 3 (Payment)
 # =============================================================================
 
-async def process_payment_streaming(invoice_id: str) -> AsyncGenerator[dict, None]:
+async def process_payment_streaming(
+    invoice_id: str,
+    approved_by: str = None,
+    invoice_status: str = None,
+) -> AsyncGenerator[dict, None]:
     """
     STAGE 3: Run payment agent with streaming events.
     
     Called when user executes payment for an approved invoice.
+    
+    Args:
+        invoice_id: ID of the invoice to process payment for
+        approved_by: Who approved the invoice (e.g., "human:user@email.com")
+        invoice_status: Current invoice status from frontend (e.g., "ready_to_pay")
     """
     start_time = time.time()
     
@@ -583,6 +774,28 @@ async def process_payment_streaming(invoice_id: str) -> AsyncGenerator[dict, Non
     if not state:
         yield make_event("error", message="Invoice has no workflow state")
         return
+    
+    # Ensure we have the latest audit trail from the store
+    state["audit_trail"] = stored.get("audit_trail", state.get("audit_trail", []))
+    
+    # =========================================================================
+    # HUMAN APPROVAL: Update state with frontend approval info
+    # When human approves on frontend, sync that to backend state
+    # =========================================================================
+    if approved_by:
+        state["approved_by"] = approved_by
+        yield log_event("info", f"📝 Approved by: {approved_by}")
+        
+        # If human approved, update the approval_decision
+        if approved_by.startswith("human:"):
+            approval_decision = state.get("approval_decision", {})
+            approval_decision["approved"] = True
+            approval_decision["decided_by"] = approved_by
+            state["approval_decision"] = approval_decision
+    
+    if invoice_status:
+        state["invoice_status"] = invoice_status
+        yield log_event("info", f"📝 Invoice status: {invoice_status}")
     
     yield make_event("stage_start", stage="payment", description="Execute transaction")
     yield log_event("system", "═" * 50)
@@ -628,10 +841,11 @@ async def process_payment_streaming(invoice_id: str) -> AsyncGenerator[dict, Non
             yield log_event("error", f"❌ Payment failed: {pay_data.get('error')}")
             yield make_event("stage_complete", stage="payment", status="failed", data=payment_json)
         
-        # Update store
+        # Update store with audit trail from payment agent
         invoice_store[invoice_id]["workflow_state"] = dict(state)
         invoice_store[invoice_id]["status"] = state["invoice_status"]
         invoice_store[invoice_id]["payment_result"] = pay_data
+        invoice_store[invoice_id]["audit_trail"] = state.get("audit_trail", [])
         
         processing_time = time.time() - start_time
         total_usage = get_total_usage()
@@ -643,6 +857,7 @@ async def process_payment_streaming(invoice_id: str) -> AsyncGenerator[dict, Non
             "approval_decision": state.get("approval_decision"),
             "payment_result": pay_data,
             "token_usage": total_usage,
+            "audit_trail": state.get("audit_trail", []),
         }
         
         yield make_event("complete", result=final_result, processing_time=processing_time, token_usage=total_usage)

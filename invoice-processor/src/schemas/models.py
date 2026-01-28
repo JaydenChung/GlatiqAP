@@ -234,6 +234,44 @@ class PaymentResult(TypedDict):
     error: Optional[str]  # Error message if failed
 
 
+# =============================================================================
+# AUDIT TRAIL MODELS (Session 2026-01-28_EXPLAIN)
+# =============================================================================
+
+# Audit event types for invoice lifecycle tracking
+AuditEventType = Literal[
+    "invoice_received",      # Invoice uploaded/received
+    "ai_processing",         # AI extraction started/completed
+    "validation_complete",   # Validation agent finished
+    "approval_routed",       # Routed to approval queue
+    "approval_decision",     # Approval decision made (human or AI)
+    "payment_initiated",     # Payment process started
+    "payment_complete",      # Payment successful
+    "payment_rejected",      # Payment blocked (invoice not approved)
+    "payment_failed",        # Payment API error
+]
+
+
+class AuditEvent(TypedDict):
+    """
+    Single audit trail event for invoice lifecycle tracking.
+    
+    Each event captures:
+    - What happened (event_type)
+    - When it happened (timestamp)
+    - Who/what did it (actor)
+    - Details about the event (details)
+    - Optional AI-generated summary (ai_summary)
+    """
+    event_type: AuditEventType
+    timestamp: str  # ISO 8601 timestamp
+    actor: str  # "system", "ai:ingestion", "ai:validation", "ai:approval", "ai:payment", "human:email@example.com"
+    title: str  # Human-readable event title
+    description: str  # Human-readable event description
+    details: Optional[dict]  # Event-specific structured data
+    ai_summary: Optional[str]  # Grok-generated summary (for complex events)
+
+
 # Workflow status enumeration (legacy - kept for compatibility)
 WorkflowStatus = Literal[
     "processing",  # Workflow in progress
@@ -254,6 +292,9 @@ class WorkflowState(TypedDict):
     - Added invoice_status for staged processing
     - Added approval_analysis for smart triage
     - Added audit trail fields
+    
+    Updated: Session 2026-01-28_EXPLAIN
+    - Added audit_trail list for structured event logging
     """
     # Input
     raw_invoice: str  # The original invoice text
@@ -273,12 +314,15 @@ class WorkflowState(TypedDict):
     status: WorkflowStatus  # Overall workflow status (legacy)
     error: Optional[str]  # Error message if status == "failed"
     
-    # Audit trail
+    # Audit trail (legacy fields)
     approved_by: Optional[str]  # "agent" or human identifier
     approved_at: Optional[str]  # ISO timestamp
     rejected_by: Optional[str]
     rejected_at: Optional[str]
     rejection_reason: Optional[str]
+    
+    # Structured audit trail (Session 2026-01-28_EXPLAIN)
+    audit_trail: Optional[List[AuditEvent]]  # Chronological list of audit events
 
 
 # Type aliases for cleaner function signatures

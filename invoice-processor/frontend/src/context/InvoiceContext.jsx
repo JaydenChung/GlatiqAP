@@ -61,6 +61,12 @@ function mergeApprovalHistory(existingHistory, approvalHistory) {
   const approvalTime = parseFloat(approvalHistory.processingTime) || 0;
   const totalTime = (existingTime + approvalTime).toFixed(1);
 
+  // Merge audit trails (Session 2026-01-28_EXPLAIN)
+  const mergedAuditTrail = [
+    ...(existingHistory.auditTrail || []),
+    ...(approvalHistory.auditTrail || []),
+  ];
+
   return {
     ...existingHistory,
     logs: [...existingLogs, ...approvalLogs],
@@ -73,6 +79,7 @@ function mergeApprovalHistory(existingHistory, approvalHistory) {
       current_agent: 'complete',
       status: 'complete',
     },
+    auditTrail: mergedAuditTrail,
     approvalProcessedAt: new Date().toISOString(),
   };
 }
@@ -150,21 +157,41 @@ export function InvoiceProvider({ children }) {
         aiTriageResult: result,
         aiResult: { ...invoice.aiResult, status: 'auto_approved', route: 'auto_approve' },
         processingHistory: mergedHistory,
+        auditTrail: mergedHistory.auditTrail || invoice.auditTrail || [],  // Session 2026-01-28_EXPLAIN
       };
       
       setProcessedInvoices(prev => prev.filter(inv => inv.id !== invoiceId));
       setPayableInvoices(prev => [payableInvoice, ...prev]);
     } else if (route === 'auto_reject') {
-      // Auto-rejected by AI
+      // Auto-rejected by AI - Payment Agent has logged the rejection with Grok analysis
+      // Find the rejection audit event to get the detailed reason
+      const auditTrail = mergedHistory.auditTrail || invoice.auditTrail || [];
+      const rejectionEvent = auditTrail.find(e => e.event_type === 'payment_rejected');
+      const rejectionReason = rejectionEvent?.details?.primary_reason || 
+                             rejectionEvent?.description || 
+                             'Auto-rejected due to major red flags';
+      
+      // Extract critical flags from rejection event for display
+      const criticalFlags = rejectionEvent?.details?.contributing_factors || 
+                           invoice.aiResult?.red_flags || 
+                           [];
+      
       const rejectedInvoice = {
         ...invoice,
         status: 'rejected',
         rejectedAt: new Date().toISOString(),
-        rejectedBy: 'AI Approval Agent',
-        rejectionReason: 'Auto-rejected due to major red flags',
+        rejectedBy: 'AI Payment Agent',  // Payment Agent logged the rejection
+        rejectionReason: rejectionReason,
         aiTriageResult: result,
-        aiResult: { ...invoice.aiResult, status: 'rejected', route: 'auto_reject' },
+        aiResult: { 
+          ...invoice.aiResult, 
+          status: 'rejected', 
+          route: 'auto_reject',
+          critical_flags: criticalFlags,  // For DetailPage rejection banner
+          rejection_details: rejectionEvent?.details || {},
+        },
         processingHistory: mergedHistory,
+        auditTrail: auditTrail,  // Session 2026-01-28_EXPLAIN
       };
       
       setProcessedInvoices(prev => prev.map(inv => 
@@ -181,6 +208,7 @@ export function InvoiceProvider({ children }) {
         aiTriageResult: result,
         aiResult: { ...invoice.aiResult, status: 'pending_approval', route: 'route_to_human' },
         processingHistory: mergedHistory,
+        auditTrail: mergedHistory.auditTrail || invoice.auditTrail || [],  // Session 2026-01-28_EXPLAIN
       };
       
       setProcessedInvoices(prev => prev.filter(inv => inv.id !== invoiceId));
@@ -381,6 +409,7 @@ export function InvoiceProvider({ children }) {
       paymentMethod: invoice.paymentMethod || 'ACH',
       paymentAgentResult: result,
       processingHistory: mergedHistory,
+      auditTrail: processingHistory?.auditTrail || result.auditTrail || invoice.auditTrail || [],  // Session 2026-01-28_EXPLAIN
       aiResult: {
         ...(invoice.aiResult || {}),
         status: 'paid',

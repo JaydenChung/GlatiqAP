@@ -226,6 +226,34 @@ class PaymentResult(BaseModel):
     error: Optional[str] = None
 
 
+# =============================================================================
+# AUDIT TRAIL MODELS (Session 2026-01-28_EXPLAIN)
+# =============================================================================
+
+AuditEventType = Literal[
+    "invoice_received",
+    "ai_processing",
+    "validation_complete",
+    "approval_routed",
+    "approval_decision",
+    "payment_initiated",
+    "payment_complete",
+    "payment_rejected",
+    "payment_failed",
+]
+
+
+class AuditEvent(BaseModel):
+    """Single audit trail event for invoice lifecycle tracking."""
+    event_type: AuditEventType
+    timestamp: str  # ISO 8601
+    actor: str  # "system", "ai:ingestion", "ai:payment", "human:email@example.com"
+    title: str  # Human-readable event title
+    description: str  # Human-readable event description
+    details: Optional[dict] = None  # Event-specific structured data
+    ai_summary: Optional[str] = None  # Grok-generated summary
+
+
 class ProcessingResult(BaseModel):
     """Final processing result."""
     status: Literal["completed", "rejected", "failed"]

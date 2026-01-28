@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { Eye, AlertTriangle, FileText, Users, Mail, DollarSign, Package, ArrowRight } from 'lucide-react';
+import { Eye, AlertTriangle, FileText, Users, Mail, DollarSign, Package, ArrowRight, XCircle } from 'lucide-react';
 
 const formatCurrency = (amount, currency = 'USD') => {
   const formatter = new Intl.NumberFormat('en-US', {
@@ -45,11 +45,12 @@ export default function InvoiceTable({ invoices, onRoute, variant = 'default' })
   }
 
   const isReviewVariant = variant === 'review';
+  const isRejectedVariant = variant === 'rejected';
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
       {/* Table Header */}
-      <div className="grid grid-cols-12 gap-4 px-6 py-3 border-b border-gray-100 text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
+      <div className={`grid grid-cols-12 gap-4 px-6 py-3 border-b text-[11px] font-semibold text-gray-500 uppercase tracking-wider ${isRejectedVariant ? 'border-red-100 bg-red-50/30' : 'border-gray-100'}`}>
         <div className="col-span-1 flex items-center">
           <input
             type="checkbox"
@@ -60,9 +61,10 @@ export default function InvoiceTable({ invoices, onRoute, variant = 'default' })
         <div className="col-span-2">Vendor</div>
         <div className="col-span-2">Invoice #</div>
         {isReviewVariant && <div className="col-span-2">Issue</div>}
-        <div className={isReviewVariant ? 'col-span-1 text-right' : 'col-span-2 text-right'}>Amount</div>
+        {isRejectedVariant && <div className="col-span-3">Rejection Reason</div>}
+        <div className={(isReviewVariant || isRejectedVariant) ? 'col-span-1 text-right' : 'col-span-2 text-right'}>Amount</div>
         <div className="col-span-1">Due Date</div>
-        <div className="col-span-2">Entity</div>
+        {!isRejectedVariant && <div className="col-span-2">Entity</div>}
         <div className="col-span-1"></div>
       </div>
 
@@ -72,7 +74,11 @@ export default function InvoiceTable({ invoices, onRoute, variant = 'default' })
           <div
             key={invoice.id}
             onClick={() => handleRowClick(invoice)}
-            className="grid grid-cols-12 gap-4 px-6 py-4 items-center cursor-pointer hover:bg-gray-50/50 transition-colors"
+            className={`grid grid-cols-12 gap-4 px-6 py-4 items-center cursor-pointer transition-colors ${
+              isRejectedVariant 
+                ? 'bg-red-50/30 hover:bg-red-50/50 border-l-4 border-red-400' 
+                : 'hover:bg-gray-50/50'
+            }`}
           >
             {/* Checkbox */}
             <div className="col-span-1">
@@ -121,9 +127,21 @@ export default function InvoiceTable({ invoices, onRoute, variant = 'default' })
               </div>
             )}
 
+            {/* Rejection Reason (only for rejected variant) */}
+            {isRejectedVariant && (
+              <div className="col-span-3">
+                <div className="flex items-start gap-1.5">
+                  <XCircle size={14} className="text-red-500 mt-0.5 flex-shrink-0" />
+                  <span className="text-sm text-red-700 line-clamp-2">
+                    {invoice.rejectionReason || invoice.aiResult?.reason || 'Critical red flags detected'}
+                  </span>
+                </div>
+              </div>
+            )}
+
             {/* Amount */}
-            <div className={`${isReviewVariant ? 'col-span-1' : 'col-span-2'} text-right`}>
-              <span className="text-sm font-semibold text-gray-900 tabular-nums">
+            <div className={`${(isReviewVariant || isRejectedVariant) ? 'col-span-1' : 'col-span-2'} text-right`}>
+              <span className={`text-sm font-semibold tabular-nums ${isRejectedVariant ? 'text-red-700' : 'text-gray-900'}`}>
                 {formatCurrency(invoice.amount, invoice.currency)}
               </span>
             </div>
@@ -135,12 +153,14 @@ export default function InvoiceTable({ invoices, onRoute, variant = 'default' })
               </span>
             </div>
 
-            {/* Entity */}
-            <div className="col-span-2">
-              <span className="text-sm text-gray-600">
-                {invoice.entity || 'TechCorp Inc. — US'}
-              </span>
-            </div>
+            {/* Entity (hidden for rejected variant) */}
+            {!isRejectedVariant && (
+              <div className="col-span-2">
+                <span className="text-sm text-gray-600">
+                  {invoice.entity || 'TechCorp Inc. — US'}
+                </span>
+              </div>
+            )}
 
             {/* Actions */}
             <div className="col-span-1 flex items-center justify-end gap-2">

@@ -12,6 +12,7 @@
 
 | Session | Goal | Status |
 |---------|------|--------|
+| [2026-01-28_TRIAGE](./2026-01-28_TRIAGE/CLOSURE_REPORT.md) | CRITICAL Error Detection — Approval Agent Fix | ✅ CLOSED |
 | [2026-01-27_PAYMENT](./2026-01-27_PAYMENT/CLOSURE_REPORT.md) | Payment Agent Handoff — Streaming Modal | ✅ CLOSED |
 | [2026-01-27_INGEST](./2026-01-27_INGEST/CLOSURE_REPORT.md) | PDF Parsing Integration | ✅ CLOSED |
 | [2026-01-27_WORKFLOW](./2026-01-27_WORKFLOW/CLOSURE_REPORT.md) | Workflow Redesign — Staged AP Flow | ✅ CLOSED |

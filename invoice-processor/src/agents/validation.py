@@ -26,7 +26,7 @@ import src  # noqa: F401 - triggers path setup in __init__.py
 
 from src.client import call_grok
 from src.schemas.models import WorkflowState, ValidationResult
-from src.tools.database import validate_inventory, lookup_vendor_by_name
+from src.tools.database import validate_inventory, lookup_vendor_by_name, get_all_inventory, check_stock
 from src.utils import clean_json_response
 
 
@@ -326,6 +326,202 @@ OUTPUT:
 
 
 # =============================================================================
+# INVENTORY MATCHING PROMPT (Grok-Powered Fuzzy Matching)
+# =============================================================================
+
+INVENTORY_MATCHING_PROMPT = """You are an inventory matching system. Your task is to match invoice line items to inventory items in our database.
+
+## Instructions
+For each invoice item, find the BEST matching inventory item. Handle:
+- Typos and spelling variations (e.g., "Widgit" → "Widget")
+- Model numbers in parentheses (e.g., "Gadget X (Model G-X20)" → "GadgetX")
+- Case differences (e.g., "widgeta" → "WidgetA")
+- Spacing differences (e.g., "Widget A" → "WidgetA")
+- Abbreviations (e.g., "Wgt-A" → "WidgetA")
+
+## Output Schema
+Return a JSON object with:
+- "matches": array of match objects, one per invoice item
+  - "invoice_item": string — the original item name from the invoice
+  - "matched_inventory": string or null — the matched inventory item name, or null if no match
+  - "confidence": number 0-1 — how confident you are in the match (1.0 = exact, 0.8+ = high, 0.5-0.8 = medium, <0.5 = low)
+  - "match_reason": string — brief explanation of why this match was made (or why no match)
+
+## Rules
+- Only match to items that actually exist in the inventory list
+- If no reasonable match exists, set matched_inventory to null
+- Be generous with matching — handle messy real-world inputs
+- Confidence should reflect how certain the match is
+
+## Example
+
+INVOICE ITEMS:
+- "Gadget X (Model G-X20)"
+- "Widget Type A, Premium"
+- "FakeProduct123"
+
+AVAILABLE INVENTORY:
+- WidgetA (15 in stock)
+- WidgetB (10 in stock)
+- GadgetX (5 in stock)
+
+OUTPUT:
+{
+  "matches": [
+    {"invoice_item": "Gadget X (Model G-X20)", "matched_inventory": "GadgetX", "confidence": 0.95, "match_reason": "Core name 'Gadget X' matches 'GadgetX' after removing model number and normalizing"},
+    {"invoice_item": "Widget Type A, Premium", "matched_inventory": "WidgetA", "confidence": 0.85, "match_reason": "Core name 'Widget...A' matches 'WidgetA' after removing descriptor"},
+    {"invoice_item": "FakeProduct123", "matched_inventory": null, "confidence": 0, "match_reason": "No similar item found in inventory"}
+  ]
+}"""
+
+
+# =============================================================================
+# INVENTORY MATCHING FUNCTION
+# =============================================================================
+
+def match_invoice_items_to_inventory(invoice_items: list[dict]) -> dict:
+    """
+    Use Grok to fuzzy-match invoice items to inventory items.
+    
+    This handles typos, model numbers, case differences, etc.
+    
+    Args:
+        invoice_items: List of invoice line items with 'name' and 'quantity'
+        
+    Returns:
+        Dict with:
+        - matches: list of match results
+        - matched_inventory_check: dict mapping matched names to stock info
+    """
+    # Get all inventory items from database
+    all_inventory = get_all_inventory()
+    
+    if not all_inventory:
+        return {
+            "matches": [],
+            "matched_inventory_check": {},
+            "error": "No inventory items in database"
+        }
+    
+    # Build inventory list for prompt
+    inventory_list = "\n".join([
+        f"- {item['item']} ({item['stock']} in stock)"
+        for item in all_inventory
+    ])
+    
+    # Build invoice items list for prompt
+    invoice_items_list = "\n".join([
+        f"- \"{item.get('name', 'UNKNOWN')}\""
+        for item in invoice_items
+    ])
+    
+    # Build the prompt
+    messages = [
+        {
+            "role": "system",
+            "content": INVENTORY_MATCHING_PROMPT
+        },
+        {
+            "role": "user",
+            "content": f"""Match these invoice items to inventory:
+
+INVOICE ITEMS:
+{invoice_items_list}
+
+AVAILABLE INVENTORY:
+{inventory_list}
+
+Return the matches as JSON."""
+        }
+    ]
+    
+    try:
+        response = call_grok(
+            messages=messages,
+            json_mode=True,
+            max_tokens=500
+        )
+        
+        cleaned_response = clean_json_response(response)
+        result = json.loads(cleaned_response)
+        matches = result.get("matches", [])
+        
+    except Exception as e:
+        print(f"   ⚠️ Grok matching failed, using exact matching fallback: {e}")
+        # Fallback to exact matching
+        matches = []
+        for item in invoice_items:
+            item_name = item.get("name", "")
+            exact_match = check_stock(item_name)
+            if exact_match:
+                matches.append({
+                    "invoice_item": item_name,
+                    "matched_inventory": item_name,
+                    "confidence": 1.0,
+                    "match_reason": "Exact match"
+                })
+            else:
+                matches.append({
+                    "invoice_item": item_name,
+                    "matched_inventory": None,
+                    "confidence": 0,
+                    "match_reason": "No match found (exact matching only)"
+                })
+    
+    # Now do stock checks using matched names
+    matched_inventory_check = {}
+    for i, match in enumerate(matches):
+        invoice_item = match.get("invoice_item", "")
+        matched_name = match.get("matched_inventory")
+        quantity = invoice_items[i].get("quantity", 0) if i < len(invoice_items) else 0
+        
+        if matched_name:
+            stock_info = check_stock(matched_name)
+            if stock_info:
+                in_stock = stock_info["stock"]
+                available = in_stock >= quantity
+                matched_inventory_check[invoice_item] = {
+                    "invoice_item": invoice_item,
+                    "matched_to": matched_name,
+                    "confidence": match.get("confidence", 0),
+                    "match_reason": match.get("match_reason", ""),
+                    "requested": quantity,
+                    "in_stock": in_stock,
+                    "available": available,
+                    "variance": in_stock - quantity,  # Negative = shortage
+                }
+            else:
+                # Matched name not found in DB (shouldn't happen but be safe)
+                matched_inventory_check[invoice_item] = {
+                    "invoice_item": invoice_item,
+                    "matched_to": matched_name,
+                    "confidence": match.get("confidence", 0),
+                    "match_reason": match.get("match_reason", ""),
+                    "requested": quantity,
+                    "in_stock": 0,
+                    "available": False,
+                    "variance": -quantity,
+                }
+        else:
+            # No match found
+            matched_inventory_check[invoice_item] = {
+                "invoice_item": invoice_item,
+                "matched_to": None,
+                "confidence": 0,
+                "match_reason": match.get("match_reason", "No match found"),
+                "requested": quantity,
+                "in_stock": 0,
+                "available": False,
+                "variance": -quantity,
+            }
+    
+    return {
+        "matches": matches,
+        "matched_inventory_check": matched_inventory_check,
+    }
+
+
+# =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
@@ -373,11 +569,27 @@ def format_inventory_results(inventory_check: dict) -> str:
     
     lines = []
     for item_name, check in inventory_check.items():
-        status = "✓ AVAILABLE" if check["available"] else "✗ INSUFFICIENT"
-        lines.append(
-            f"- {item_name}: requested={check['requested']}, "
-            f"in_stock={check['in_stock']}, status={status}"
-        )
+        status = "✓ AVAILABLE" if check.get("available") else "✗ INSUFFICIENT"
+        matched_to = check.get("matched_to")
+        
+        if matched_to and matched_to != item_name:
+            # Show the fuzzy match
+            lines.append(
+                f"- {item_name} (matched to '{matched_to}'): "
+                f"requested={check.get('requested', 0)}, "
+                f"in_stock={check.get('in_stock', 0)}, status={status}"
+            )
+        elif matched_to:
+            # Exact match
+            lines.append(
+                f"- {item_name}: requested={check.get('requested', 0)}, "
+                f"in_stock={check.get('in_stock', 0)}, status={status}"
+            )
+        else:
+            # No match found
+            lines.append(
+                f"- {item_name}: NO MATCH IN INVENTORY (requested={check.get('requested', 0)})"
+            )
     return "\n".join(lines)
 
 
@@ -512,15 +724,27 @@ def validation_agent(state: WorkflowState) -> dict:
     
     print()
     
-    # Step 1: Check inventory database (deterministic)
-    print("   🔍 Checking inventory database...")
-    inventory_check = validate_inventory(items)
+    # Step 1: GROK-POWERED INVENTORY MATCHING (handles typos, variations)
+    print("   🔍 Matching invoice items to inventory (Grok-powered)...")
     
+    matching_result = match_invoice_items_to_inventory(items)
+    inventory_check = matching_result.get("matched_inventory_check", {})
+    matches = matching_result.get("matches", [])
+    
+    # Display matching results
     all_available = True
     for item_name, check in inventory_check.items():
-        status = "✅" if check["available"] else "❌"
-        print(f"      {status} {item_name}: need {check['requested']}, have {check['in_stock']}")
-        if not check["available"]:
+        matched_to = check.get("matched_to")
+        confidence = check.get("confidence", 0)
+        
+        if matched_to:
+            status = "✅" if check["available"] else "❌"
+            match_indicator = f" → matched to '{matched_to}' ({confidence*100:.0f}%)" if matched_to != item_name else ""
+            print(f"      {status} {item_name}{match_indicator}: need {check['requested']}, have {check['in_stock']}")
+            if not check["available"]:
+                all_available = False
+        else:
+            print(f"      ❌ {item_name}: NO MATCH FOUND in inventory")
             all_available = False
     
     # Step 2: Build context for Grok reasoning
@@ -611,14 +835,44 @@ def validation_agent(state: WorkflowState) -> dict:
         if vendor_profile.get("compliance_status") != "complete":
             warnings.append(f"VENDOR: {vendor} has incomplete compliance documentation")
     
+    # Build detailed line items for frontend display
+    line_items_validated = []
+    for item in items:
+        item_name = item.get("name", "UNKNOWN")
+        check = inventory_check.get(item_name, {})
+        
+        line_item_detail = {
+            "name": item_name,
+            "quantity_requested": item.get("quantity", 0),
+            "unit_price": item.get("unit_price", 0),
+            "amount": item.get("amount", 0),
+            # Matching info
+            "matched_to": check.get("matched_to"),
+            "match_confidence": check.get("confidence", 0),
+            "match_reason": check.get("match_reason", ""),
+            # Stock info
+            "in_stock": check.get("in_stock", 0),
+            "available": check.get("available", False),
+            "variance": check.get("variance", 0),  # Negative = shortage
+            # Flags for UI
+            "has_stock_issue": not check.get("available", False),
+            "is_fuzzy_match": check.get("matched_to") and check.get("matched_to") != item_name,
+            "no_match_found": check.get("matched_to") is None,
+        }
+        line_items_validated.append(line_item_detail)
+    
     validation_result: ValidationResult = {
         "is_valid": is_valid,
         "errors": errors,
         "warnings": warnings,
         "inventory_check": inventory_check,
+        "line_items_validated": line_items_validated,  # NEW: Detailed per-item info for frontend
         "corrections": corrections,  # Includes both corrections and enrichments
         "matched_vendor": vendor_profile.get("vendor_id") if vendor_profile else None,
         "enrichments": enrichments,  # Separate tracking of enrichments
+        # Full vendor profile from vendor master (Session 2026-01-28_VENDOR)
+        # Used to populate Vendor Compliance section from authoritative source
+        "vendor_profile": vendor_profile,
     }
     
     return {

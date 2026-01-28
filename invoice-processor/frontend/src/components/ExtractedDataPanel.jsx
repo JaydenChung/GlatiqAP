@@ -13,7 +13,11 @@ import {
   Calendar,
   CreditCard,
   Hash,
-  DollarSign
+  DollarSign,
+  AlertTriangle,
+  ArrowRight,
+  Sparkles,
+  XCircle
 } from 'lucide-react';
 import ConfidenceBadge from './ConfidenceBadge';
 
@@ -59,15 +63,19 @@ export default function ExtractedDataPanel({ invoice }) {
     }).format(amount);
   };
 
+  // Check for all "good" statuses that should show the green banner
+  const goodStatuses = ['ready_for_approval', 'approved', 'auto_approved', 'paid', 'fully_approved'];
+  const isAllClear = goodStatuses.includes(invoice.status);
+
   return (
     <div className="h-full flex flex-col bg-gray-50">
       {/* Status Banner */}
       <div className={`px-6 py-3 flex items-center justify-center gap-2 ${
-        invoice.status === 'ready_for_approval' 
+        isAllClear 
           ? 'bg-green-500 text-white' 
           : 'bg-amber-500 text-white'
       }`}>
-        {invoice.status === 'ready_for_approval' ? (
+        {isAllClear ? (
           <>
             <CheckCircle size={18} />
             <span className="font-medium">All Clear — Ready for Approval</span>
@@ -254,34 +262,139 @@ export default function ExtractedDataPanel({ invoice }) {
           <div className="space-y-6">
             <div>
               <h2 className="text-xl font-bold text-gray-900 mb-1">Line Items</h2>
-              <p className="text-sm text-gray-500">Extracted line items from invoice</p>
+              <p className="text-sm text-gray-500">Extracted line items with inventory validation</p>
             </div>
+            
+            {/* Validation Summary */}
+            {(invoice.aiValidation?.line_items_validated || invoice.validationResult?.line_items_validated) && (
+              <div className={`rounded-xl p-4 ${
+                (invoice.aiValidation?.line_items_validated || invoice.validationResult?.line_items_validated).some(i => i.has_stock_issue)
+                  ? 'bg-amber-50 border border-amber-200'
+                  : 'bg-green-50 border border-green-200'
+              }`}>
+                <div className="flex items-center gap-2">
+                  {(invoice.aiValidation?.line_items_validated || invoice.validationResult?.line_items_validated).some(i => i.has_stock_issue) ? (
+                    <>
+                      <AlertTriangle size={18} className="text-amber-600" />
+                      <span className="font-medium text-amber-800">
+                        Inventory Issues Detected — Review items below
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle size={18} className="text-green-600" />
+                      <span className="font-medium text-green-800">
+                        All Items Validated — Inventory available
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+            
             <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
               <table className="w-full">
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="text-left py-3 px-4 text-sm font-medium text-gray-500">Description</th>
-                    <th className="text-center py-3 px-4 text-sm font-medium text-gray-500">Qty</th>
+                    <th className="text-center py-3 px-4 text-sm font-medium text-gray-500">Requested</th>
+                    <th className="text-center py-3 px-4 text-sm font-medium text-gray-500">In Stock</th>
                     <th className="text-right py-3 px-4 text-sm font-medium text-gray-500">Rate</th>
                     <th className="text-right py-3 px-4 text-sm font-medium text-gray-500">Amount</th>
+                    <th className="text-center py-3 px-4 text-sm font-medium text-gray-500">Status</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {invoice.lineItems?.map((item, idx) => (
-                    <tr key={idx}>
-                      <td className="py-3 px-4 text-gray-900">{item.description}</td>
-                      <td className="py-3 px-4 text-center text-gray-600">{item.quantity}</td>
-                      <td className="py-3 px-4 text-right text-gray-600">${item.rate.toLocaleString()}</td>
-                      <td className="py-3 px-4 text-right font-medium text-gray-900">${item.amount.toLocaleString()}</td>
-                    </tr>
-                  ))}
+                  {(invoice.aiValidation?.line_items_validated || invoice.validationResult?.line_items_validated || invoice.lineItems)?.map((item, idx) => {
+                    // Handle both new validated format and legacy format
+                    const isValidated = !!item.matched_to || item.has_stock_issue !== undefined;
+                    const description = item.name || item.description;
+                    const quantity = item.quantity_requested || item.quantity;
+                    const inStock = item.in_stock;
+                    const rate = item.unit_price || item.rate || 0;
+                    const amount = item.amount || (quantity * rate);
+                    const hasIssue = item.has_stock_issue;
+                    const isFuzzyMatch = item.is_fuzzy_match;
+                    const matchedTo = item.matched_to;
+                    const noMatch = item.no_match_found;
+                    const variance = item.variance;
+                    const matchConfidence = item.match_confidence;
+                    
+                    return (
+                      <tr key={idx} className={hasIssue ? 'bg-red-50' : ''}>
+                        <td className="py-3 px-4">
+                          <div className="text-gray-900">{description}</div>
+                          {isFuzzyMatch && matchedTo && (
+                            <div className="flex items-center gap-1 mt-1 text-xs text-blue-600">
+                              <Sparkles size={12} />
+                              <span>Matched to "{matchedTo}"</span>
+                              {matchConfidence && (
+                                <span className="text-gray-400">({Math.round(matchConfidence * 100)}%)</span>
+                              )}
+                            </div>
+                          )}
+                          {noMatch && (
+                            <div className="flex items-center gap-1 mt-1 text-xs text-red-600">
+                              <XCircle size={12} />
+                              <span>Not found in inventory</span>
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          <span className={hasIssue ? 'text-red-600 font-medium' : 'text-gray-600'}>
+                            {quantity}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          {isValidated ? (
+                            <div className="flex flex-col items-center">
+                              <span className={hasIssue ? 'text-red-600 font-medium' : 'text-green-600'}>
+                                {inStock}
+                              </span>
+                              {hasIssue && variance !== undefined && (
+                                <span className="text-xs text-red-500">
+                                  ({variance} shortage)
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-right text-gray-600">
+                          ${rate.toLocaleString()}
+                        </td>
+                        <td className="py-3 px-4 text-right font-medium text-gray-900">
+                          ${amount.toLocaleString()}
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          {isValidated ? (
+                            hasIssue ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-700">
+                                <AlertTriangle size={12} />
+                                Review
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-700">
+                                <CheckCircle size={12} />
+                                OK
+                              </span>
+                            )
+                          ) : (
+                            <span className="text-gray-400 text-xs">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
                 <tfoot className="bg-gray-50">
                   <tr>
-                    <td colSpan="3" className="py-3 px-4 text-right font-medium text-gray-500">Total</td>
+                    <td colSpan="4" className="py-3 px-4 text-right font-medium text-gray-500">Total</td>
                     <td className="py-3 px-4 text-right font-bold text-gray-900">
                       {formatCurrency(invoice.amount, invoice.currency)}
                     </td>
+                    <td></td>
                   </tr>
                 </tfoot>
               </table>

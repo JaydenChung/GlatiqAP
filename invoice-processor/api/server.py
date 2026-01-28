@@ -721,11 +721,20 @@ async def websocket_approval(websocket: WebSocket, invoice_id: str):
 
 
 @app.websocket("/ws/payment/{invoice_id}")
-async def websocket_payment(websocket: WebSocket, invoice_id: str):
+async def websocket_payment(
+    websocket: WebSocket, 
+    invoice_id: str,
+    approved_by: str = None,  # Query param: who approved (e.g., "human:user@email.com")
+    invoice_status: str = None,  # Query param: current status (e.g., "ready_to_pay")
+):
     """
     WebSocket endpoint for Stage 3 (Payment) with streaming.
     
-    Alternative to POST /api/invoices/{id}/execute-payment for real-time updates.
+    Query Parameters:
+        approved_by: Who approved the invoice (e.g., "human:user@email.com" for human approval)
+        invoice_status: Current invoice status (e.g., "ready_to_pay", "approved")
+    
+    These parameters allow the frontend to communicate human approval state to the backend.
     """
     await websocket.accept()
     
@@ -736,7 +745,7 @@ async def websocket_payment(websocket: WebSocket, invoice_id: str):
             "message": f"Executing payment for {invoice_id}",
         })
         
-        async for event in process_payment_streaming(invoice_id):
+        async for event in process_payment_streaming(invoice_id, approved_by=approved_by, invoice_status=invoice_status):
             await websocket.send_json(event)
             await asyncio.sleep(0.01)
         

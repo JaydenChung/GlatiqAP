@@ -97,6 +97,7 @@ export default function ProcessingView({ invoice, onComplete, approvalMode = fal
     status: 'processing',
   });
   const [wsStatus, setWsStatus] = useState('connecting'); // 'connecting' | 'connected' | 'error' | 'closed'
+  const [auditTrail, setAuditTrail] = useState([]);  // Session 2026-01-28_EXPLAIN: Audit trail events
   const [tokenUsage, setTokenUsage] = useState({
     total: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
     byStage: {}
@@ -122,7 +123,27 @@ export default function ProcessingView({ invoice, onComplete, approvalMode = fal
     
     if (paymentMode) {
       // For payment mode, connect to the payment WebSocket endpoint
-      wsUrl = `${PAYMENT_WEBSOCKET_URL}/${backendId}`;
+      // Include approval info so backend knows if human approved
+      const params = new URLSearchParams();
+      
+      // Check for human approval indicators
+      const approvalChain = invoice.approvalChain || [];
+      const humanApproved = approvalChain.some(a => a.status === 'approved');
+      const fullyApproved = invoice.fullyApprovedAt || invoice.status === 'ready_to_pay';
+      
+      if (fullyApproved || humanApproved) {
+        // Find who approved (last approver in chain or fallback)
+        const lastApprover = approvalChain.filter(a => a.status === 'approved').pop();
+        const approvedBy = lastApprover?.name || invoice.approvedBy || 'User';
+        params.append('approved_by', `human:${approvedBy}`);
+      }
+      
+      if (invoice.status) {
+        params.append('invoice_status', invoice.status);
+      }
+      
+      const queryString = params.toString();
+      wsUrl = `${PAYMENT_WEBSOCKET_URL}/${backendId}${queryString ? '?' + queryString : ''}`;
     } else if (approvalMode) {
       // For approval mode, connect to the approval WebSocket endpoint
       wsUrl = `${APPROVAL_WEBSOCKET_URL}/${backendId}`;
@@ -300,6 +321,10 @@ export default function ProcessingView({ invoice, onComplete, approvalMode = fal
         
       case 'state_update':
         setWorkflowState(event.state);
+        // Capture audit trail from state if present
+        if (event.state?.audit_trail) {
+          setAuditTrail(event.state.audit_trail);
+        }
         break;
         
       case 'log':
@@ -366,6 +391,11 @@ export default function ProcessingView({ invoice, onComplete, approvalMode = fal
       }));
     }
     
+    // Capture audit trail from result
+    if (resultData.audit_trail) {
+      setAuditTrail(resultData.audit_trail);
+    }
+    
     // Set result to trigger the footer - status is "inbox" for staged workflow
     setResult({
       status: 'inbox',
@@ -382,6 +412,8 @@ export default function ProcessingView({ invoice, onComplete, approvalMode = fal
       source_type: resultData.source_type,
       source_path: resultData.source_path,
       original_filename: resultData.original_filename,
+      // Audit trail (Session 2026-01-28_EXPLAIN)
+      auditTrail: resultData.audit_trail || [],
     });
   };
 
@@ -396,8 +428,19 @@ export default function ProcessingView({ invoice, onComplete, approvalMode = fal
       }));
     }
     
+    // Capture audit trail from result (includes Payment Agent rejection logging)
+    if (resultData.audit_trail) {
+      setAuditTrail(resultData.audit_trail);
+    }
+    
     // Mark approval stage as complete
     updateStageStatus(2, 'complete');
+    
+    // For auto_reject, the Payment Agent also ran to log the rejection
+    // Mark payment stage as "failed" (rejection logged)
+    if (resultData.route === 'auto_reject') {
+      updateStageStatus(3, 'failed');  // Payment logged rejection
+    }
     
     // Update approval result with route info
     const newApprovalResult = {
@@ -419,6 +462,7 @@ export default function ProcessingView({ invoice, onComplete, approvalMode = fal
       route: resultData.route,
       processingTime: event.processing_time,
       tokenUsage: event.token_usage,
+      auditTrail: resultData.audit_trail || [],  // Include audit trail with rejection
     };
     setResult(newResult);
     
@@ -447,6 +491,11 @@ export default function ProcessingView({ invoice, onComplete, approvalMode = fal
       }));
     }
     
+    // Capture audit trail from result (Session 2026-01-28_EXPLAIN)
+    if (resultData.audit_trail) {
+      setAuditTrail(resultData.audit_trail);
+    }
+    
     // In payment mode, handle payment-specific result
     if (paymentMode) {
       // Mark payment stage complete
@@ -459,6 +508,7 @@ export default function ProcessingView({ invoice, onComplete, approvalMode = fal
         processingTime: event.processing_time,
         tokenUsage: event.token_usage,
         invoiceData: resultData.invoice_data,
+        auditTrail: resultData.audit_trail || [],  // Include audit trail
       });
       
       // Update workflow state
@@ -477,6 +527,7 @@ export default function ProcessingView({ invoice, onComplete, approvalMode = fal
         transactionId: payment.transaction_id,
         processingTime: event.processing_time,
         tokenUsage: event.token_usage,
+        auditTrail: resultData.audit_trail || [],  // Include audit trail
       });
     }
   };
@@ -1096,6 +1147,7 @@ export default function ProcessingView({ invoice, onComplete, approvalMode = fal
                 invoiceId: result.invoiceId,
                 approvalMode,
                 paymentMode,
+                auditTrail: auditTrail.length > 0 ? auditTrail : (result.auditTrail || []),  // Session 2026-01-28_EXPLAIN
               })}
               className={`font-medium px-4 py-1.5 text-sm rounded-lg transition-all ${
                 result.status === 'approved' || result.status === 'auto_approved' || result.status === 'paid'

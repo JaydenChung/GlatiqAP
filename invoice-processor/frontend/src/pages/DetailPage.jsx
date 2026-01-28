@@ -8,6 +8,7 @@ import {
   Save,
   CheckCircle,
   AlertCircle,
+  AlertTriangle,
   FileText,
   Building2,
   List,
@@ -22,11 +23,16 @@ import {
   DollarSign,
   ChevronDown,
   Cpu,
-  Sparkles
+  Sparkles,
+  TrendingDown,
+  ShieldAlert,
+  Ban,
+  XCircle
 } from 'lucide-react';
 import PDFViewer from '../components/PDFViewer';
 import ProcessingHistoryView from '../components/ProcessingHistoryView';
 import ProcessingView from '../components/ProcessingView';
+import CollaboratePanel from '../components/CollaboratePanel';
 import { useInvoices } from '../context/InvoiceContext';
 
 const tabs = [
@@ -44,6 +50,7 @@ export default function DetailPage() {
   const [activeTab, setActiveTab] = useState('header');
   const [showProcessingHistory, setShowProcessingHistory] = useState(false);
   const [showApprovalModal, setShowApprovalModal] = useState(false);
+  const [showCollaboratePanel, setShowCollaboratePanel] = useState(false);
   const [highlightField, setHighlightField] = useState(null); // Field to highlight in processing history
 
   // Open processing history and highlight a specific field
@@ -69,7 +76,22 @@ export default function DetailPage() {
   }
 
   const currentTabIndex = tabs.findIndex(t => t.id === activeTab);
-  const isReadyForApproval = invoice.status === 'ready_for_approval';
+  // Check for all "good" statuses that should show the green banner
+  const goodStatuses = ['ready_for_approval', 'approved', 'auto_approved', 'paid', 'fully_approved'];
+  const isReadyForApproval = goodStatuses.includes(invoice.status);
+  const isRejected = invoice.status === 'rejected';
+
+  // Parse vendor risk warnings from validation
+  const validationWarnings = invoice.aiValidation?.warnings || [];
+  const validationErrors = invoice.aiValidation?.errors || [];
+  
+  // Check for specific vendor risk conditions
+  const vendorRiskAlerts = {
+    isSuspended: validationErrors.some(e => e.includes('SUSPENDED')),
+    isHighRisk: validationWarnings.some(w => w.includes('HIGH RISK')),
+    hasIncompleteCompliance: validationWarnings.some(w => w.includes('incomplete compliance')),
+  };
+  const hasVendorRiskAlerts = vendorRiskAlerts.isSuspended || vendorRiskAlerts.isHighRisk || vendorRiskAlerts.hasIncompleteCompliance;
 
   // Open approval modal to run the Approval Agent
   const handleRouteForApproval = () => {
@@ -120,23 +142,42 @@ export default function DetailPage() {
   return (
     <div className="fixed inset-0 bg-gray-50 z-50 flex flex-col">
       {/* Status Banner - Full Width at Top */}
-      <div className={`px-6 py-2 flex items-center justify-center gap-2 ${
-        isReadyForApproval 
-          ? 'bg-teal-500 text-white' 
-          : 'bg-amber-500 text-white'
-      }`}>
-        {isReadyForApproval ? (
-          <>
-            <CheckCircle size={16} strokeWidth={2.5} />
-            <span className="font-medium text-sm">All Clear — Ready for Approval</span>
-          </>
-        ) : (
-          <>
-            <AlertCircle size={16} strokeWidth={2.5} />
-            <span className="font-medium text-sm">Review Required — Check Flagged Fields</span>
-          </>
-        )}
-      </div>
+      {/* Critical: Suspended Vendor or Rejected Invoice */}
+      {(vendorRiskAlerts.isSuspended || isRejected) ? (
+        <div className="px-6 py-2.5 flex items-center justify-center gap-2 bg-red-600 text-white">
+          <Ban size={16} strokeWidth={2.5} />
+          <span className="font-medium text-sm">
+            {vendorRiskAlerts.isSuspended 
+              ? `⚠️ SUSPENDED VENDOR — ${invoice.vendor} is blocked in vendor master` 
+              : `Auto-Rejected — Critical issues detected`}
+          </span>
+        </div>
+      ) : (
+        <div className={`px-6 py-2 flex items-center justify-center gap-2 ${
+          isReadyForApproval 
+            ? 'bg-teal-500 text-white' 
+            : hasVendorRiskAlerts
+              ? 'bg-amber-600 text-white'
+              : 'bg-amber-500 text-white'
+        }`}>
+          {isReadyForApproval ? (
+            <>
+              <CheckCircle size={16} strokeWidth={2.5} />
+              <span className="font-medium text-sm">All Clear — Ready for Approval</span>
+            </>
+          ) : hasVendorRiskAlerts ? (
+            <>
+              <ShieldAlert size={16} strokeWidth={2.5} />
+              <span className="font-medium text-sm">⚠️ Vendor Risk Alerts — Review Compliance Tab</span>
+            </>
+          ) : (
+            <>
+              <AlertCircle size={16} strokeWidth={2.5} />
+              <span className="font-medium text-sm">Review Required — Check Flagged Fields</span>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Header Bar */}
       <div className="bg-white border-b border-gray-200 px-5 py-2.5 flex items-center justify-between">
@@ -164,7 +205,10 @@ export default function DetailPage() {
               <span>View AI Processing</span>
             </button>
           )}
-          <button className="flex items-center gap-1.5 px-3 py-1.5 text-gray-600 hover:bg-gray-50 rounded-lg transition-colors border border-gray-200 text-sm">
+          <button 
+            onClick={() => setShowCollaboratePanel(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-gray-600 hover:bg-gray-50 rounded-lg transition-colors border border-gray-200 text-sm"
+          >
             <MessageSquare size={14} />
             <span>Collaborate</span>
           </button>
@@ -226,6 +270,48 @@ export default function DetailPage() {
         <div className="w-[60%] overflow-auto px-6 py-5">
           {activeTab === 'header' && (
             <div className="space-y-5 max-w-2xl">
+              {/* Rejection/Critical Issues Banner - Only for rejected invoices or critical errors */}
+              {(isRejected || validationErrors.length > 0) && (
+                <div className={`border rounded-xl overflow-hidden ${
+                  isRejected ? 'border-red-300 ring-2 ring-red-100' : 'border-amber-300'
+                }`}>
+                  <div className={`px-4 py-3 flex items-center gap-2 ${
+                    isRejected ? 'bg-red-50' : 'bg-amber-50'
+                  }`}>
+                    <XCircle size={18} className={isRejected ? 'text-red-500' : 'text-amber-500'} />
+                    <h3 className={`font-semibold text-sm ${isRejected ? 'text-red-800' : 'text-amber-800'}`}>
+                      {isRejected ? 'Invoice Auto-Rejected' : 'Validation Issues'}
+                    </h3>
+                    {isRejected && (
+                      <span className="ml-auto text-[10px] font-semibold px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                        CRITICAL
+                      </span>
+                    )}
+                  </div>
+                  <div className="px-4 py-3 bg-white space-y-2">
+                    {/* Show validation errors (deduplicated) - these are the primary issues */}
+                    {validationErrors.length > 0 && (
+                      <div className="space-y-1.5">
+                        {validationErrors.map((error, idx) => (
+                          <div key={idx} className="flex items-start gap-2 text-sm text-red-700">
+                            <Ban size={14} className="mt-0.5 flex-shrink-0" />
+                            <span>{error}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {/* Show rejection reason - summarizes the issues */}
+                    {isRejected && invoice.rejectionReason && (
+                      <div className="pt-2 mt-2 border-t border-red-100">
+                        <p className="text-xs text-red-600">
+                          <strong>Rejection Reason:</strong> {invoice.rejectionReason}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Section Title */}
               <div>
                 <h2 className="text-base font-semibold text-gray-900">Header Details</h2>
@@ -415,87 +501,197 @@ export default function DetailPage() {
             </div>
           )}
 
-          {activeTab === 'vendor' && (
+          {activeTab === 'vendor' && (() => {
+            // Session 2026-01-28_VENDOR: Use vendor master data instead of AI extraction
+            // vendorProfile is the authoritative source from vendor master database
+            const vendorProfile = invoice.vendorProfile;
+            const hasVendorRecord = !!vendorProfile;
+            
+            // Build full address from vendor profile components
+            const vendorAddress = hasVendorRecord && vendorProfile.address
+              ? [vendorProfile.address, vendorProfile.city, vendorProfile.state, vendorProfile.zip_code]
+                  .filter(Boolean)
+                  .join(', ')
+              : null;
+            
+            return (
             <div className="space-y-5 max-w-2xl">
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-base font-semibold text-gray-900">Vendor Compliance</h2>
                   <p className="text-xs text-gray-500">Tax IDs, banking verification, and remit-to addresses</p>
                 </div>
-                {invoice._aiExtracted?.billFrom && (
-                  <div className="flex items-center gap-1.5 text-[10px] text-purple-500 bg-purple-50 px-2 py-1 rounded-full">
-                    <Sparkles size={10} />
-                    <span>AI Extracted Fields</span>
+                {/* Show "Vendor on Record" badge if matched, or "Not Found" warning if not */}
+                {hasVendorRecord ? (
+                  <div className="flex items-center gap-1.5 text-[10px] text-teal-600 bg-teal-50 px-2 py-1 rounded-full border border-teal-200">
+                    <CheckCircle size={10} />
+                    <span>Vendor on Record: {vendorProfile.vendor_id}</span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5 text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded-full border border-amber-200">
+                    <AlertTriangle size={10} />
+                    <span>Vendor Not in System</span>
                   </div>
                 )}
               </div>
 
-              {/* Vendor Information Section */}
+              {/* Vendor Risk Alerts Section - Only shown when there are risks */}
+              {hasVendorRiskAlerts && (
+                <div className={`border rounded-xl overflow-hidden ${
+                  vendorRiskAlerts.isSuspended ? 'border-red-300 ring-2 ring-red-100' : 'border-amber-300 ring-1 ring-amber-100'
+                }`}>
+                  {/* Header */}
+                  <div className={`px-4 py-3 flex items-center gap-2 ${
+                    vendorRiskAlerts.isSuspended ? 'bg-red-50' : 'bg-amber-50'
+                  }`}>
+                    <ShieldAlert size={18} className={vendorRiskAlerts.isSuspended ? 'text-red-500' : 'text-amber-500'} />
+                    <h3 className={`font-semibold text-sm ${vendorRiskAlerts.isSuspended ? 'text-red-800' : 'text-amber-800'}`}>
+                      Vendor Risk Alerts
+                    </h3>
+                    <span className={`ml-auto text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                      vendorRiskAlerts.isSuspended 
+                        ? 'bg-red-100 text-red-700' 
+                        : 'bg-amber-100 text-amber-700'
+                    }`}>
+                      {vendorRiskAlerts.isSuspended ? 'CRITICAL' : 'WARNING'}
+                    </span>
+                  </div>
+                  
+                  {/* Alert Items */}
+                  <div className="divide-y divide-gray-100 bg-white">
+                    {/* Suspended Vendor Alert */}
+                    {vendorRiskAlerts.isSuspended && (
+                      <div className="px-4 py-3 flex items-start gap-3 bg-red-50/50">
+                        <div className="w-8 h-8 rounded-lg bg-red-100 flex items-center justify-center flex-shrink-0">
+                          <Ban size={16} className="text-red-600" />
+                        </div>
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-red-800">Vendor Suspended</span>
+                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-red-100 text-red-700">BLOCKED</span>
+                          </div>
+                          <p className="text-xs text-red-700 mt-0.5">
+                            {invoice.vendor} is suspended in the vendor master directory. This invoice cannot be processed until the vendor status is resolved.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* High Risk Alert */}
+                    {vendorRiskAlerts.isHighRisk && (
+                      <div className="px-4 py-3 flex items-start gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-amber-100 flex items-center justify-center flex-shrink-0">
+                          <AlertTriangle size={16} className="text-amber-600" />
+                        </div>
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-amber-800">High Risk Vendor</span>
+                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">FLAGGED</span>
+                          </div>
+                          <p className="text-xs text-gray-600 mt-0.5">
+                            This vendor has been flagged as high risk in our system. Additional scrutiny is recommended before approval.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Incomplete Compliance Alert */}
+                    {vendorRiskAlerts.hasIncompleteCompliance && (
+                      <div className="px-4 py-3 flex items-start gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-amber-100 flex items-center justify-center flex-shrink-0">
+                          <FileText size={16} className="text-amber-600" />
+                        </div>
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-amber-800">Incomplete Compliance</span>
+                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">MISSING DOCS</span>
+                          </div>
+                          <p className="text-xs text-gray-600 mt-0.5">
+                            Vendor has incomplete compliance documentation (e.g., W-9, certificates). Request updated documents before processing.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Vendor Information Section - FROM VENDOR MASTER (not AI) */}
               <div>
                 <div className="flex items-center gap-2 mb-3">
-                  <FileText size={14} className={invoice._aiExtracted?.vendor ? 'text-purple-400' : 'text-gray-400'} />
+                  <FileText size={14} className="text-gray-400" />
                   <span className="text-sm font-medium text-gray-700">Vendor Information</span>
                 </div>
                 <div className="space-y-3">
                   <div className="grid grid-cols-2 gap-3">
+                    {/* Vendor Name from vendor master */}
                     <Field 
                       icon={Building2} 
                       label="Vendor Name" 
-                      value={invoice.billFrom?.name || invoice.vendor}
-                      aiExtracted={invoice.billFrom?._aiExtracted?.name || invoice._aiExtracted?.vendor}
-                      onClick={handleFieldClick}
+                      value={hasVendorRecord ? vendorProfile.name : null}
                     />
-                    <Field icon={FileText} label="Tax ID / EIN" value="XX-XXXXXXX" />
+                    {/* Tax ID from vendor master (masked for display) */}
+                    <Field 
+                      icon={FileText} 
+                      label="Tax ID / EIN" 
+                      value={hasVendorRecord && vendorProfile.tax_id ? vendorProfile.tax_id : null} 
+                    />
                   </div>
                   <div className="grid grid-cols-2 gap-3">
+                    {/* Email from vendor master */}
                     <Field 
                       icon={Mail} 
                       label="Email" 
-                      value={invoice.billFrom?.email}
-                      aiExtracted={invoice.billFrom?._aiExtracted?.email && !invoice.billFrom?._validationEnriched?.email}
-                      validationCorrected={!!invoice.billFrom?._validationEnriched?.email}
-                      onClick={handleFieldClick}
+                      value={hasVendorRecord ? vendorProfile.email : null}
                     />
+                    {/* Phone from vendor master */}
                     <Field 
                       icon={Phone} 
                       label="Phone" 
-                      value={invoice.billFrom?.phone}
-                      aiExtracted={invoice.billFrom?._aiExtracted?.phone && !invoice.billFrom?._validationEnriched?.phone}
-                      validationCorrected={!!invoice.billFrom?._validationEnriched?.phone}
-                      onClick={handleFieldClick}
+                      value={hasVendorRecord ? vendorProfile.phone : null}
                     />
                   </div>
                 </div>
               </div>
 
-              {/* Remit-to Address Section */}
+              {/* Remit-to Address Section - FROM VENDOR MASTER (not AI) */}
               <div>
                 <div className="flex items-center gap-2 mb-3">
-                  <MapPin size={14} className={invoice.billFrom?._aiExtracted?.address ? 'text-purple-400' : 'text-gray-400'} />
+                  <MapPin size={14} className="text-gray-400" />
                   <span className="text-sm font-medium text-gray-700">Remit-to Address</span>
-                  {invoice.billFrom?._aiExtracted?.address && (
-                    <Sparkles size={12} className="text-purple-400" />
-                  )}
                 </div>
                 <Field 
                   icon={MapPin} 
                   label="Address" 
-                  value={invoice.billFrom?.address} 
+                  value={vendorAddress} 
                   hideLabel
-                  aiExtracted={invoice.billFrom?._aiExtracted?.address && !invoice.billFrom?._validationEnriched?.address}
-                  validationCorrected={!!invoice.billFrom?._validationEnriched?.address}
-                  onClick={handleFieldClick}
                 />
               </div>
             </div>
-          )}
+            );
+          })()}
 
-          {activeTab === 'line_items' && (
-            <div className="space-y-4 max-w-3xl">
+          {activeTab === 'line_items' && (() => {
+            // Get validated line items if available
+            const validatedItems = invoice.aiValidation?.line_items_validated || [];
+            const hasValidationData = validatedItems.length > 0;
+            const itemsWithIssues = validatedItems.filter(i => i.has_stock_issue);
+            const hasInventoryIssues = itemsWithIssues.length > 0;
+            
+            // Calculate total variance
+            const totalVariance = validatedItems.reduce((sum, item) => {
+              if (item.has_stock_issue && item.variance < 0) {
+                return sum + item.variance;
+              }
+              return sum;
+            }, 0);
+            
+            return (
+            <div className="space-y-4 max-w-4xl">
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-base font-semibold text-gray-900">Line Items</h2>
-                  <p className="text-xs text-gray-500">Verify extracted line items and GL coding</p>
+                  <p className="text-xs text-gray-500">Verify extracted line items and inventory validation</p>
                 </div>
                 {invoice._aiExtracted?.items && (
                   <div className="flex items-center gap-1.5 text-[10px] text-purple-500 bg-purple-50 px-2 py-1 rounded-full">
@@ -505,38 +701,61 @@ export default function DetailPage() {
                 )}
               </div>
 
-              {/* Stats Header */}
-              <div className={`bg-white border rounded-xl p-4 flex items-center justify-between ${
+              {/* Stats Header with Variance */}
+              <div className={`bg-white border rounded-xl p-4 ${
+                hasInventoryIssues ? 'border-red-200 ring-1 ring-red-50' : 
                 invoice._aiExtracted?.items ? 'border-purple-200 ring-1 ring-purple-50' : 'border-gray-200'
               }`}>
-                <div className="flex items-center gap-6">
-                  <div className="flex items-baseline gap-1.5">
-                    <span className={`text-2xl font-bold ${invoice._aiExtracted?.items ? 'text-purple-600' : 'text-gray-900'}`}>
-                      {invoice.lineItems?.length || 1}
-                    </span>
-                    <span className="text-sm text-gray-500">Lines</span>
-                  </div>
-                  <div className="flex items-baseline gap-1.5">
-                    <span className={`text-2xl font-bold ${invoice._aiExtracted?.amount ? 'text-purple-600' : 'text-gray-900'}`}>
-                      ${formatCurrency(invoice.amount)}
-                    </span>
-                    <span className="text-sm text-gray-500">Total</span>
-                    {invoice._aiExtracted?.amount && (
-                      <Sparkles size={12} className="text-purple-400 ml-1" />
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-6">
+                    <div className="flex items-baseline gap-1.5">
+                      <span className={`text-2xl font-bold ${invoice._aiExtracted?.items ? 'text-purple-600' : 'text-gray-900'}`}>
+                        {invoice.lineItems?.length || 1}
+                      </span>
+                      <span className="text-sm text-gray-500">Lines</span>
+                    </div>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className={`text-2xl font-bold ${invoice._aiExtracted?.amount ? 'text-purple-600' : 'text-gray-900'}`}>
+                        ${formatCurrency(invoice.amount)}
+                      </span>
+                      <span className="text-sm text-gray-500">Total</span>
+                      {invoice._aiExtracted?.amount && (
+                        <Sparkles size={12} className="text-purple-400 ml-1" />
+                      )}
+                    </div>
+                    {hasInventoryIssues ? (
+                      <div className="flex items-center gap-1.5 text-red-600">
+                        <AlertTriangle size={16} strokeWidth={2.5} />
+                        <span className="text-sm font-medium">{itemsWithIssues.length} Exception{itemsWithIssues.length > 1 ? 's' : ''}</span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5 text-teal-600">
+                        <CheckCircle size={16} strokeWidth={2.5} />
+                        <span className="text-sm font-medium">All Verified</span>
+                      </div>
                     )}
                   </div>
-                  <div className="flex items-center gap-1.5 text-teal-600">
-                    <CheckCircle size={16} strokeWidth={2.5} />
-                    <span className="text-sm font-medium">All Verified</span>
+                  <div className="flex items-center gap-4">
+                    {/* Variance Card */}
+                    {hasValidationData && totalVariance !== 0 && (
+                      <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-red-50 border border-red-200">
+                        <TrendingDown size={14} className="text-red-500" />
+                        <span className="text-xs text-gray-500">Qty Variance</span>
+                        <span className="text-sm font-bold text-red-600">{totalVariance}</span>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-2">
+                      {invoice._aiExtracted?.items && (
+                        <Sparkles size={16} className="text-purple-400" />
+                      )}
+                      <span className={`text-2xl font-bold ${
+                        hasInventoryIssues ? 'text-red-500' :
+                        invoice._aiExtracted?.items ? 'text-purple-500' : 'text-teal-500'
+                      }`}>
+                        {invoice.confidence || 100}%
+                      </span>
+                    </div>
                   </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  {invoice._aiExtracted?.items && (
-                    <Sparkles size={16} className="text-purple-400" />
-                  )}
-                  <span className={`text-2xl font-bold ${invoice._aiExtracted?.items ? 'text-purple-500' : 'text-teal-500'}`}>
-                    {invoice.confidence || 100}%
-                  </span>
                 </div>
               </div>
 
@@ -554,46 +773,83 @@ export default function DetailPage() {
 
               {/* Table */}
               <div className={`bg-white border rounded-xl overflow-hidden ${
+                hasInventoryIssues ? 'border-red-200' :
                 invoice._aiExtracted?.items ? 'border-purple-200' : 'border-gray-200'
               }`}>
                 <table className="w-full text-xs">
                   <thead>
-                    <tr className="border-b border-gray-200">
+                    <tr className="border-b border-gray-200 bg-gray-50">
                       <th className="text-left py-3 px-3 font-medium text-gray-500 text-[11px] w-8">#</th>
-                      <th className="text-left py-3 px-3 font-medium text-gray-500 text-[11px]">Item</th>
                       <th className="text-left py-3 px-3 font-medium text-gray-500 text-[11px]">Description</th>
-                      <th className="text-center py-3 px-3 font-medium text-gray-500 text-[11px]">Qty</th>
+                      <th className="text-center py-3 px-3 font-medium text-gray-500 text-[11px]">Inv Qty</th>
+                      {hasValidationData && (
+                        <th className="text-center py-3 px-3 font-medium text-gray-500 text-[11px]">In Stock</th>
+                      )}
                       <th className="text-right py-3 px-3 font-medium text-gray-500 text-[11px]">Rate</th>
                       <th className="text-right py-3 px-3 font-medium text-gray-500 text-[11px]">Amount</th>
-                      <th className="w-16"></th>
+                      {hasValidationData && (
+                        <>
+                          <th className="text-center py-3 px-3 font-medium text-gray-500 text-[11px]">Variance</th>
+                          <th className="text-center py-3 px-3 font-medium text-gray-500 text-[11px]">Status</th>
+                        </>
+                      )}
+                      <th className="w-12"></th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {invoice.lineItems?.length > 0 ? (
-                      invoice.lineItems.map((item, idx) => (
-                        <tr key={idx} className={`hover:bg-gray-50 ${item._aiExtracted?.description ? 'bg-purple-50/30' : ''}`}>
+                      invoice.lineItems.map((item, idx) => {
+                        // Find matching validated item
+                        const validatedItem = validatedItems.find(v => 
+                          v.name === item.description || 
+                          v.name === (item.description || item.item)
+                        ) || validatedItems[idx];
+                        const hasIssue = validatedItem?.has_stock_issue;
+                        const variance = validatedItem?.variance;
+                        const inStock = validatedItem?.in_stock;
+                        const matchedTo = validatedItem?.matched_to;
+                        const isFuzzyMatch = validatedItem?.is_fuzzy_match;
+                        
+                        return (
+                        <tr key={idx} className={`hover:bg-gray-50 ${
+                          hasIssue ? 'bg-red-50' : 
+                          item._aiExtracted?.description ? 'bg-purple-50/30' : ''
+                        }`}>
                           <td className="py-3 px-3 text-gray-400">{idx + 1}.</td>
                           <td className="py-3 px-3">
-                            <div className="flex items-center gap-1.5">
-                              {item._aiExtracted?.sku && <Sparkles size={10} className="text-purple-400" />}
-                              <span className={`font-medium ${item._aiExtracted?.sku ? 'text-purple-700' : 'text-gray-900'}`}>
-                                {item.item || item.sku || `ITEM-${idx + 1}`}
-                              </span>
-                            </div>
-                          </td>
-                          <td className="py-3 px-3">
-                            <div className="flex items-center gap-1.5">
-                              {item._aiExtracted?.description && <Sparkles size={10} className="text-purple-400" />}
-                              <span className={item._aiExtracted?.description ? 'text-purple-700' : 'text-gray-600'}>
-                                {item.description}
-                              </span>
+                            <div className="flex flex-col gap-0.5">
+                              <div className="flex items-center gap-1.5">
+                                {item._aiExtracted?.description && <Sparkles size={10} className="text-purple-400" />}
+                                <span className={`font-medium ${
+                                  hasIssue ? 'text-red-700' :
+                                  item._aiExtracted?.description ? 'text-purple-700' : 'text-gray-900'
+                                }`}>
+                                  {item.description}
+                                </span>
+                              </div>
+                              {isFuzzyMatch && matchedTo && (
+                                <div className="flex items-center gap-1 text-[10px] text-blue-600">
+                                  <Sparkles size={8} />
+                                  <span>Matched to "{matchedTo}"</span>
+                                </div>
+                              )}
                             </div>
                           </td>
                           <td className="py-3 px-3 text-center">
-                            <span className={item._aiExtracted?.quantity ? 'text-purple-700 font-medium' : 'text-gray-600'}>
+                            <span className={`font-medium ${
+                              hasIssue ? 'text-red-700' :
+                              item._aiExtracted?.quantity ? 'text-purple-700' : 'text-gray-600'
+                            }`}>
                               {item.quantity}
                             </span>
                           </td>
+                          {hasValidationData && (
+                            <td className="py-3 px-3 text-center">
+                              <span className={`font-medium ${hasIssue ? 'text-red-600' : 'text-green-600'}`}>
+                                {inStock !== undefined ? inStock : '—'}
+                              </span>
+                            </td>
+                          )}
                           <td className="py-3 px-3 text-right">
                             <span className={item._aiExtracted?.rate ? 'text-purple-700' : 'text-gray-600'}>
                               {item.rate ? `$${item.rate.toLocaleString()}` : '—'}
@@ -602,11 +858,39 @@ export default function DetailPage() {
                           <td className="py-3 px-3 text-right">
                             <div className="flex items-center justify-end gap-1">
                               {item._aiExtracted?.amount && <Sparkles size={10} className="text-purple-400" />}
-                              <span className={`font-medium ${item._aiExtracted?.amount ? 'text-purple-700' : 'text-gray-900'}`}>
+                              <span className={`font-medium ${
+                                hasIssue ? 'text-red-700' :
+                                item._aiExtracted?.amount ? 'text-purple-700' : 'text-gray-900'
+                              }`}>
                                 {item.amount ? `$${item.amount.toLocaleString()}` : '—'}
                               </span>
                             </div>
                           </td>
+                          {hasValidationData && (
+                            <>
+                              <td className="py-3 px-3 text-center">
+                                {variance !== undefined && variance !== 0 ? (
+                                  <span className={`font-medium ${variance < 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                    {variance > 0 ? '+' : ''}{variance}
+                                  </span>
+                                ) : (
+                                  <span className="text-gray-400">—</span>
+                                )}
+                              </td>
+                              <td className="py-3 px-3 text-center">
+                                {hasIssue ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-100 text-red-700 border border-red-200">
+                                    Exception
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-green-100 text-green-700">
+                                    <CheckCircle size={10} />
+                                    OK
+                                  </span>
+                                )}
+                              </td>
+                            </>
+                          )}
                           <td className="py-3 px-3">
                             <div className="flex items-center justify-end gap-1">
                               <button className="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-gray-600">
@@ -622,7 +906,8 @@ export default function DetailPage() {
                             </div>
                           </td>
                         </tr>
-                      ))
+                        );
+                      })
                     ) : (
                       <tr className="hover:bg-gray-50">
                         <td className="py-3 px-3 text-gray-400">1.</td>
@@ -651,7 +936,8 @@ export default function DetailPage() {
                 </table>
               </div>
             </div>
-          )}
+            );
+          })()}
 
           {activeTab === 'documents' && (
             <div className="space-y-4 max-w-2xl">
@@ -735,6 +1021,14 @@ export default function DetailPage() {
             },
             validationResult: invoice.aiValidation,
           }}
+        />
+      )}
+
+      {/* Collaborate Panel (Comments, Approvals, Audit) */}
+      {showCollaboratePanel && (
+        <CollaboratePanel 
+          invoice={invoice}
+          onClose={() => setShowCollaboratePanel(false)}
         />
       )}
     </div>

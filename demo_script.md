@@ -3,6 +3,7 @@
 > **Multi-Agent Invoice Processing with xAI Grok and LangGraph**
 > 
 > Galatiq Committee Session: `2026-01-27_DOCUMENT`
+> Updated: `2026-01-28_REVIEW` (CRITICAL error detection, audit trail, vendor compliance)
 
 ---
 
@@ -53,18 +54,25 @@
 ┌──────────────────────────────────┐   ┌──────────────────────────────────┐
 │  STAGE 3: APPROVAL AGENT         │   │  ❌ REJECTED                      │
 │  ┌────────────────────────────┐  │   │  (Validation Failed)             │
-│  │  Smart Triage Logic:       │  │   └──────────────────────────────────┘
+│  │  Five-Flow Triage Logic:   │  │   └──────────────────────────────────┘
 │  │                            │  │
-│  │  <$10K + no flags:         │  │
-│  │    → AUTO-APPROVE          │  │
+│  │  1. CRITICAL errors:       │  │
+│  │    → AUTO-REJECT (bypass)  │  │
+│  │    (suspended vendor,      │  │
+│  │     variance ≥100 units)   │  │
 │  │                            │  │
-│  │  ≥$10K OR flags:           │  │
-│  │    → ROUTE TO HUMAN        │  │
-│  │                            │  │
-│  │  Major red flags (fraud):  │  │
+│  │  2. Failed + <$10K:        │  │
 │  │    → AUTO-REJECT           │  │
 │  │                            │  │
-│  │  Chain-of-Thought reasoning│  │
+│  │  3. Failed + ≥$10K:        │  │
+│  │    → ROUTE TO HUMAN        │  │
+│  │                            │  │
+│  │  4. Passed + ≥$10K:        │  │
+│  │    → ROUTE TO HUMAN        │  │
+│  │                            │  │
+│  │  5. Passed + <$10K:        │  │
+│  │    → AUTO-APPROVE          │  │
+│  │                            │  │
 │  │  Risk score: 0.0 to 1.0    │  │
 │  └────────────────────────────┘  │
 └──────────────────────────────────┘
@@ -101,13 +109,15 @@ WorkflowState (TypedDict) — Single source of truth flowing through all agents:
 ├──────────────────────┼──────────────────────────────────────────────────────────────┤
 │  invoice_data        │ Extracted: vendor, amount, items, dates, contacts            │
 ├──────────────────────┼──────────────────────────────────────────────────────────────┤
-│  validation_result   │ is_valid, errors, warnings, inventory_check, corrections     │
+│  validation_result   │ is_valid, errors, warnings, inventory_check, vendor_profile  │
 ├──────────────────────┼──────────────────────────────────────────────────────────────┤
-│  approval_decision   │ approved, reason, risk_score, route, red_flags               │
+│  approval_decision   │ approved, reason, risk_score, route, red_flags, critical_flags│
 ├──────────────────────┼──────────────────────────────────────────────────────────────┤
 │  payment_result      │ success, transaction_id, error                               │
 ├──────────────────────┼──────────────────────────────────────────────────────────────┤
 │  invoice_status      │ INBOX → PENDING_APPROVAL → APPROVED → PAID                   │
+├──────────────────────┼──────────────────────────────────────────────────────────────┤
+│  audit_trail         │ List of AuditEvent (Session 2026-01-28_EXPLAIN)              │
 ├──────────────────────┼──────────────────────────────────────────────────────────────┤
 │  current_agent       │ Tracks which agent is processing                             │
 └──────────────────────┴──────────────────────────────────────────────────────────────┘
@@ -181,6 +191,90 @@ def _needs_retry(extracted: dict, raw_text: str) -> bool:
 - "Calculate unit_price if only total and quantity given"
 
 This recovers data from messy invoices where the first pass might miss abbreviations.
+
+### Five-Flow Approval Triage (Session 2026-01-28_TRIAGE)
+
+> **[FIN-002] Fraud Detection Analyst:**
+> 
+> The Approval Agent uses a five-flow decision logic with CRITICAL error detection:
+
+```python
+# src/agents/approval.py - Five-Flow Decision Logic
+
+def detect_critical_flags(validation_result, invoice_data):
+    """CRITICAL errors bypass ALL dollar thresholds."""
+    critical_flags = []
+    
+    # 1. SUSPENDED VENDOR — Hard block, no exceptions
+    if invoice_data.get("vendor_status") == "suspended":
+        critical_flags.append(f"SUSPENDED VENDOR: ...")
+    
+    # 2. MASSIVE VARIANCE — Requesting 100+ more than available
+    CRITICAL_VARIANCE_THRESHOLD = -100
+    for item_name, check in inventory_check.items():
+        if check.get("variance", 0) <= CRITICAL_VARIANCE_THRESHOLD:
+            critical_flags.append(f"MASSIVE VARIANCE: ...")
+    
+    return critical_flags
+```
+
+**Five-Flow Logic:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Flow 1: CRITICAL errors detected?                              │
+│    YES → AUTO-REJECT (bypasses all dollar thresholds)           │
+│                                                                 │
+│  Flow 2: Validation FAILED + Amount < $10K?                     │
+│    YES → AUTO-REJECT                                            │
+│                                                                 │
+│  Flow 3: Validation FAILED + Amount ≥ $10K?                     │
+│    YES → ROUTE TO HUMAN (high-value needs judgment)             │
+│                                                                 │
+│  Flow 4: Validation PASSED + Amount ≥ $10K?                     │
+│    YES → ROUTE TO HUMAN (VP/manager approval required)          │
+│                                                                 │
+│  Flow 5: Validation PASSED + Amount < $10K?                     │
+│    YES → AUTO-APPROVE                                           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key Design Decision:** CRITICAL errors are disqualifiers, not edge cases for human judgment. A suspended vendor or 100+ unit variance indicates fraud or systemic data error that no human should override.
+
+### Audit Trail System (Session 2026-01-28_EXPLAIN)
+
+> **[OBS-007] Audit Trail Designer:**
+> 
+> Every invoice lifecycle event is tracked with structured audit events:
+
+```python
+# src/schemas/models.py - AuditEvent TypedDict
+
+AuditEventType = Literal[
+    "invoice_received",      # Invoice uploaded
+    "ai_processing",         # AI extraction complete
+    "validation_complete",   # Validation finished
+    "approval_routed",       # Routed to approval queue
+    "approval_decision",     # Approval decision made
+    "payment_initiated",     # Payment started
+    "payment_complete",      # Payment successful
+    "payment_rejected",      # Invoice not approved for payment
+    "payment_failed",        # Payment API error
+]
+```
+
+**Grok-Powered Rejection Logging:** When an invoice is rejected, the Payment Agent uses Grok to analyze the rejection and generate a human-readable audit log entry:
+
+```python
+# src/agents/payment.py - Grok rejection analysis
+
+def analyze_rejection_with_grok(invoice_data, approval_decision, validation_result):
+    """Generate meaningful audit log for rejected invoices."""
+    # Uses grok-3-mini for fast, structured analysis
+    # Returns: title, description, details, severity
+```
+
+This ensures audit trails contain actionable information, not just "Rejected: see approval decision."
 
 ### Tradeoffs Cut for Time
 
@@ -462,7 +556,7 @@ Terms: Net 20
 
 ---
 
-### Invoice 3: Fraud Invoice (Should Auto-Reject)
+### Invoice 3: Fraud Invoice (Should Auto-Reject via CRITICAL Flags)
 
 **Input:** `data/invoices/invoice3.txt`
 ```
@@ -474,8 +568,8 @@ Due: yesterday
 
 **Expected Behavior:**
 1. Ingestion: Extracts data, flags `unparseable_date`, `suspicious_vendor_name`, `unusually_high_amount`
-2. Validation: **FAILS** — FakeItem has 0 stock, vendor is SUSPENDED
-3. Approval: **AUTO-REJECT** — Multiple fraud indicators
+2. Validation: **FAILS** — FakeItem has 0 stock (variance = -100), vendor is SUSPENDED
+3. Approval: **AUTO-REJECT via CRITICAL FLAGS** — Bypasses dollar-amount logic entirely
 
 **Expected Output:**
 
@@ -540,38 +634,32 @@ Due: yesterday
       • VENDOR: Fraudster LLC is flagged as HIGH RISK
 
 ============================================================
-🤔 APPROVAL AGENT (Smart Triage)
+🤔 APPROVAL AGENT (Risk-Based Triage)
 ============================================================
    Vendor: Fraudster LLC
    Amount: $100,000.00
    Validation: FAILED ✗
    Threshold: $10,000 (auto-approve max)
 
-   🧠 Analyzing for smart triage...
+   🚨 CRITICAL FLAGS DETECTED:
+      ❌ SUSPENDED VENDOR: 'Fraudster LLC' is suspended in vendor master — cannot process
+      ❌ MASSIVE VARIANCE: 'FakeItem' requested 100 but only 0 in stock (shortage of 100 units)
 
-   📋 Reasoning Chain:
-      → Step 1 - Validation Gate: FAILED - inventory shortage is critical.
-      → Step 2 - Vendor Assessment: 'Fraudster LLC' is highly suspicious name...
-      → Step 3 - Amount Routing: $100,000 is extremely high.
-      → Step 4 - Red Flag Scan: MAJOR FLAGS - fake vendor, non-existent items...
-      → Step 5 - Final Routing: risk_score 0.95 >= 0.8, validation failed...
+   📋 Decision Flow:
+      → CRITICAL ERRORS: 2 found
+      → Amount: $100,000.00 (does not matter)
+      → Result: AUTO-REJECT (immediate)
 
-   🚩 Red Flags:
-      • Suspicious vendor name 'Fraudster'
-      • Validation failed - item not in stock
-      • Requesting 100 units of non-existent item
-      • Vendor is SUSPENDED
-
-   📊 Risk Score: 0.95
-
-   📍 Routing: 🔴 AUTO-REJECT (major red flags)
+   📍 Routing: 🔴 AUTO-REJECT (critical errors bypass human review)
    ❌ Recommendation: REJECT
-   💬 Multiple fraud indicators: suspicious vendor name, validation failed...
+   💬 CRITICAL errors detected: SUSPENDED VENDOR: 'Fraudster LLC' is suspended...
+
+   📊 Risk Score: 1.0 (maximum — CRITICAL errors)
 
 ============================================================
 ❌ INVOICE REJECTED
 ============================================================
-   Reason: Approval denied: Multiple fraud indicators detected
+   Reason: CRITICAL errors detected: SUSPENDED VENDOR; MASSIVE VARIANCE
 
 ============================================================
 📊 WORKFLOW COMPLETE - SUMMARY
@@ -580,10 +668,10 @@ Due: yesterday
    Vendor: Fraudster LLC
    Amount: $100,000.00
    Validation: ❌ FAILED
-   Approval: ❌ REJECTED
-   Risk Score: 0.95
+   Approval: ❌ AUTO-REJECTED (CRITICAL)
+   Risk Score: 1.00
 
-🔴 INVOICE 3: AUTO-REJECTED — Fraud indicators detected!
+🔴 INVOICE 3: AUTO-REJECTED — CRITICAL errors detected!
 ============================================================
 ```
 
@@ -659,13 +747,21 @@ def validate_inventory(items: list[dict]) -> dict:
             results[name]["available"] = False  # Blocks validation
 ```
 
-### 8. Fraud Detection
+### 8. Fraud Detection (Five-Flow Triage with CRITICAL Errors)
 
-Multiple layers:
+Multiple layers with CRITICAL error detection (Session 2026-01-28_TRIAGE):
+
 1. **Ingestion:** Flags `suspicious_vendor_name`, `unusually_high_amount`
-2. **Validation:** Vendor master check for SUSPENDED status
-3. **Approval:** Risk score ≥0.8 → `auto_reject`
-4. **Payment:** Mock API blocks known fraud vendors
+2. **Validation:** Vendor master check for SUSPENDED status, inventory variance calculation
+3. **Approval — CRITICAL Detection (NEW):**
+   - **SUSPENDED VENDOR** → Immediate auto-reject (bypasses dollar thresholds)
+   - **MASSIVE VARIANCE ≥100 units** → Immediate auto-reject (bypasses dollar thresholds)
+4. **Approval — Standard Flow:**
+   - Validation FAILED + <$10K → auto-reject
+   - Validation FAILED + ≥$10K → route to human
+   - Validation PASSED + ≥$10K → route to human  
+   - Validation PASSED + <$10K → auto-approve
+5. **Payment:** Mock API blocks known fraud vendors
 
 ### 9. Vendor Not in Database
 
@@ -744,20 +840,21 @@ python3 src/agents/ingestion.py data/invoices/sample_invoice.pdf
 |---------|--------|---------|--------|
 | **Invoice 1** (Clean) | $5,000 | ✅ PAID | Auto-approved, all checks passed |
 | **Invoice 2** (Messy) | $15,000 | ❌ REJECTED | Insufficient inventory (GadgetX) |
-| **Invoice 3** (Fraud) | $100,000 | 🔴 AUTO-REJECTED | Multiple fraud indicators |
+| **Invoice 3** (Fraud) | $100,000 | 🔴 AUTO-REJECTED (CRITICAL) | CRITICAL: Suspended vendor + massive variance |
 
 **Key Capabilities Demonstrated:**
 1. ✅ LangGraph StateGraph orchestration
 2. ✅ Grok JSON mode for structured extraction
 3. ✅ Self-correction on low-confidence extractions
-4. ✅ Smart triage with business rule thresholds
+4. ✅ Five-flow triage with CRITICAL error detection (Session 2026-01-28_TRIAGE)
 5. ✅ SQLite inventory validation
-6. ✅ Vendor master enrichment
+6. ✅ Vendor master enrichment + compliance data from vendor master (Session 2026-01-28_VENDOR)
 7. ✅ PDF text extraction (pdfplumber)
-8. ✅ Chain-of-thought approval reasoning
-9. ✅ Fraud detection and auto-rejection
-10. ✅ Structured logging throughout
+8. ✅ Fraud detection with CRITICAL flags (suspended vendor, massive variance)
+9. ✅ Grok-powered rejection logging for audit trail (Session 2026-01-28_EXPLAIN)
+10. ✅ Structured logging and audit trail throughout
 
 ---
 
 *Generated by Galatiq Committee Session `2026-01-27_DOCUMENT`*
+*Updated by Session `2026-01-28_REVIEW` — Pre-demo documentation sync*

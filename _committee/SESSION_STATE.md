@@ -4,12 +4,12 @@
 
 ```yaml
 session:
-  id: null
-  status: NO_ACTIVE_SESSION
-  goal: null
-  started: null
+  id: "2026-01-28_REVIEW"
+  status: CLOSED
+  goal: "Pre-demo documentation review — sync demo_script.md with codebase changes"
+  started: "2026-01-28T17:00:00Z"
   
-phase: AWAITING_OPENING
+phase: COMPLETE
 
 current_speaker: null
 
@@ -26,18 +26,18 @@ open_questions:
   blocking: 0
   
 artifacts:
-  created: 0
+  created: 1
 
 participants:
   active: []
   on_call: []
 
-last_updated: "2026-01-27T16:30:00Z"
+last_updated: "2026-01-28T17:30:00Z"
 
 last_session:
-  id: "2026-01-27_PAYMENT"
+  id: "2026-01-28_REVIEW"
   status: CLOSED
-  outcome: "Payment Agent handoff implemented — streaming modal shows agent activity, moves invoice to Paid tab on success"
+  outcome: "UPDATED: demo_script.md synchronized with TRIAGE, VENDOR, and EXPLAIN session changes"
 ```
 
 ---
